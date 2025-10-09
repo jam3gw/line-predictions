@@ -208,7 +208,7 @@ uv run line-predictions fetch --season 2025 --season-type REG
 
 ## Author
 
-Jake Moses (jake@pedestal.ai)
+Jake Moses (mosesjake32@gmail.com)
 
 ## License
 
