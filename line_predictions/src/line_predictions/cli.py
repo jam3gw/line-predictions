@@ -265,15 +265,51 @@ def fetch(
                 "season", "season_type", "week", "opponent_team", "rushing_yards"
             ]
         ]
-        weekly_out.to_parquet(RAW_DIR / f"weekly_{season}_{season_type}.parquet")
+        weekly_out.to_parquet(RAW_DIR / f"weekly_RB_{season}_{season_type}.parquet")
         console.print("[green]Saved weekly RB rushing via nflreadpy[/green]")
+
+        # Weekly WR receiving yards per player
+        pass_df = pbp_df[pbp_df["pass"] == 1]
+        # Filter to complete passes only
+        complete_df = pass_df[pass_df["complete_pass"] == 1]
+        weekly_wr = complete_df.groupby([
+            "season", "week", "receiver_player_id", "receiver_player_name", "posteam", "defteam"
+        ], as_index=False)["yards_gained"].sum().rename(columns={"yards_gained": "receiving_yards"})
+        
+        # Join positions from rosters to filter WRs
+        weekly_wr = weekly_wr.merge(rosters, left_on="receiver_player_id", right_on="gsis_id", how="left")
+        weekly_wr = weekly_wr[weekly_wr["position"] == "WR"]
+        
+        weekly_wr_out = weekly_wr.assign(
+            player_id=lambda d: d["receiver_player_id"],
+            player_name=lambda d: d["receiver_player_name"],
+            player_display_name=lambda d: d["receiver_player_name"],
+            recent_team=lambda d: d["posteam"],
+            opponent_team=lambda d: d["defteam"],
+            season_type=season_type,
+            position="WR",
+        )[
+            [
+                "player_id", "player_name", "player_display_name", "position", "recent_team",
+                "season", "season_type", "week", "opponent_team", "receiving_yards"
+            ]
+        ]
+        weekly_wr_out.to_parquet(RAW_DIR / f"weekly_WR_{season}_{season_type}.parquet")
+        console.print("[green]Saved weekly WR receiving via nflreadpy[/green]")
 
         # Team rushing yards allowed per game (sum opponent rushing)
         allowed = rush_df.groupby(["season", "week", "defteam"], as_index=False)["yards_gained"].sum()
         allowed = allowed.rename(columns={"defteam": "team", "yards_gained": "rush_allowed"})
         allowed["season_type"] = season_type
-        allowed.to_parquet(RAW_DIR / f"team_allowed_{season}_{season_type}.parquet")
-        console.print("[green]Saved team defense allowed via nflreadpy[/green]")
+        allowed.to_parquet(RAW_DIR / f"team_rush_allowed_{season}_{season_type}.parquet")
+        console.print("[green]Saved team rush defense allowed via nflreadpy[/green]")
+        
+        # Team passing yards allowed per game (sum opponent passing)
+        pass_allowed = complete_df.groupby(["season", "week", "defteam"], as_index=False)["yards_gained"].sum()
+        pass_allowed = pass_allowed.rename(columns={"defteam": "team", "yards_gained": "pass_allowed"})
+        pass_allowed["season_type"] = season_type
+        pass_allowed.to_parquet(RAW_DIR / f"team_pass_allowed_{season}_{season_type}.parquet")
+        console.print("[green]Saved team pass defense allowed via nflreadpy[/green]")
     except Exception as e:
         console.print(f"[red]nflreadpy failed for {season}: {e}")
         raise
@@ -283,11 +319,25 @@ def fetch(
 def fit_players(
     season: int = typer.Option(2025),
     season_type: str = typer.Option("REG"),
-    position_filter: str = typer.Option("RB", help="Filter to position group (e.g., RB)"),
+    position_filter: str = typer.Option("RB", help="Filter to position group (e.g., RB, WR)"),
 ) -> None:
-    """Fit per-RB lognormal params (mu, sigma) from weekly rushing yards and save processed JSON."""
+    """Fit per-player lognormal params (mu, sigma) from weekly yards and save processed JSON."""
     _ensure_dirs()
-    weekly_path = RAW_DIR / f"weekly_{season}_{season_type}.parquet"
+    
+    # Determine yards column and allowed file based on position
+    if position_filter == "RB":
+        yards_col = "rushing_yards"
+        allowed_col = "rush_allowed"
+        allowed_path = RAW_DIR / f"team_rush_allowed_{season}_{season_type}.parquet"
+    elif position_filter == "WR":
+        yards_col = "receiving_yards"
+        allowed_col = "pass_allowed"
+        allowed_path = RAW_DIR / f"team_pass_allowed_{season}_{season_type}.parquet"
+    else:
+        console.print(f"[red]Unsupported position: {position_filter}. Use RB or WR.[/red]")
+        raise SystemExit(1)
+    
+    weekly_path = RAW_DIR / f"weekly_{position_filter}_{season}_{season_type}.parquet"
     if not weekly_path.exists():
         console.print(f"[red]Missing weekly data at {weekly_path}. Run fetch first.[/red]")
         raise SystemExit(1)
@@ -297,36 +347,35 @@ def fit_players(
     weekly = weekly[weekly["position"] == position_filter]
 
     # Opponent normalization: scale each game's yards by opponent's season-to-date defensive strength up to prior week
-    allowed_path = RAW_DIR / f"team_allowed_{season}_{season_type}.parquet"
     if allowed_path.exists() and not weekly.empty and "opponent_team" in weekly.columns:
         allowed = pd.read_parquet(allowed_path)
         allowed = allowed[(allowed["season"] == season) & (allowed["season_type"] == season_type)]
-        allowed = allowed[["team", "week", "rush_allowed"]].copy()
+        allowed = allowed[["team", "week", allowed_col]].copy()
         # Team cumulative mean up to prior week
         allowed = allowed.sort_values(["team", "week"])  # ensure order
-        allowed["team_cum_sum"] = allowed.groupby("team")["rush_allowed"].cumsum().shift(1)
+        allowed["team_cum_sum"] = allowed.groupby("team")[allowed_col].cumsum().shift(1)
         allowed["team_cum_cnt"] = allowed.groupby("team").cumcount()
         allowed["team_cum_mean_prev"] = allowed["team_cum_sum"] / allowed["team_cum_cnt"].replace(0, np.nan)
         # League cumulative mean up to prior week
         wk_mean = (
-            allowed.groupby("week")["rush_allowed"].mean().reset_index().sort_values("week")
+            allowed.groupby("week")[allowed_col].mean().reset_index().sort_values("week")
         )
-        wk_mean["cum_sum"] = wk_mean["rush_allowed"].cumsum().shift(1)
+        wk_mean["cum_sum"] = wk_mean[allowed_col].cumsum().shift(1)
         wk_mean["cum_cnt"] = np.arange(1, len(wk_mean) + 1) - 1
         wk_mean["league_cum_mean_prev"] = wk_mean["cum_sum"] / wk_mean["cum_cnt"].replace(0, np.nan)
         allowed = allowed.merge(wk_mean[["week", "league_cum_mean_prev"]], on="week", how="left")
         eps = 1e-8
         allowed["norm_mult"] = (
-            allowed["league_cum_mean_prev"].fillna(allowed["rush_allowed"].mean())
-            / allowed["team_cum_mean_prev"].fillna(allowed["rush_allowed"].mean()).clip(lower=eps)
+            allowed["league_cum_mean_prev"].fillna(allowed[allowed_col].mean())
+            / allowed["team_cum_mean_prev"].fillna(allowed[allowed_col].mean()).clip(lower=eps)
         )
         mult = allowed[["team", "week", "norm_mult"]]
         weekly = weekly.merge(mult, left_on=["opponent_team", "week"], right_on=["team", "week"], how="left")
-        weekly["rushing_yards_adj"] = (weekly["rushing_yards"] * weekly["norm_mult"].fillna(1.0)).clip(lower=0)
+        weekly["yards_adj"] = (weekly[yards_col] * weekly["norm_mult"].fillna(1.0)).clip(lower=0)
     else:
-        weekly["rushing_yards_adj"] = weekly["rushing_yards"].clip(lower=0)
+        weekly["yards_adj"] = weekly[yards_col].clip(lower=0)
 
-    # Densify weeks: ensure every RB has an entry for each week with 0 yards if missing (DNP/zero carries)
+    # Densify weeks: ensure every player has an entry for each week with 0 yards if missing (DNP/zero carries)
     if not weekly.empty:
         all_weeks = sorted(weekly["week"].unique().tolist())
         # Keep player name/display
@@ -338,7 +387,7 @@ def fit_players(
         # Build per-player week grid
         grids = []
         for pid, grp in weekly.groupby("player_id"):
-            present = grp[["week", "rushing_yards_adj"]].set_index("week")
+            present = grp[["week", "yards_adj"]].set_index("week")
             reindexed = present.reindex(all_weeks, fill_value=0).reset_index().rename(columns={"index": "week"})
             reindexed.insert(0, "player_id", pid)
             grids.append(reindexed)
@@ -351,7 +400,7 @@ def fit_players(
     results = []
     for player_id, grp in weekly.groupby("player_id"):
         player_name = grp["player_display_name"].iloc[0] if "player_display_name" in grp else grp["player_name"].iloc[0]
-        yards = grp["rushing_yards_adj" if "rushing_yards_adj" in grp.columns else "rushing_yards"].fillna(0).clip(lower=0)
+        yards = grp["yards_adj"].fillna(0).clip(lower=0)
         mu, sigma = _fit_lognormal_from_yards(yards)
         expected = _expected_from_params(mu, sigma)
         percentiles = _percentiles_from_params(mu, sigma, [0.1, 0.25, 0.5, 0.75, 0.9])
@@ -365,70 +414,60 @@ def fit_players(
         })
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = PROCESSED_DIR / f"player_lognorm_{season}_{season_type}.json"
+    out_path = PROCESSED_DIR / f"player_lognorm_{position_filter}_{season}_{season_type}.json"
     with out_path.open("w") as f:
         json.dump(results, f, indent=2)
-    console.print(f"Saved player params -> {out_path}")
+    console.print(f"Saved {position_filter} params -> {out_path}")
 
 
 @app.command()
 def defense_adjustments(
     season: int = typer.Option(2025),
     season_type: str = typer.Option("REG"),
+    position: str = typer.Option("RB", help="Position to calculate defense for (RB or WR)"),
 ) -> None:
-    """Compute team rushing yards allowed deltas vs league average in log space (season-to-date)."""
+    """Compute team defensive yards allowed deltas vs league average in log space (season-to-date)."""
     _ensure_dirs()
-    team_path = RAW_DIR / f"team_gamelogs_{season}_{season_type}.parquet"
-    allowed_path = RAW_DIR / f"team_allowed_{season}_{season_type}.parquet"
-    use_allowed = False
-    if not team_path.exists():
-        if allowed_path.exists():
-            use_allowed = True
-        else:
-            console.print(f"[red]Missing team logs at {team_path} and allowed at {allowed_path}. Run fetch first.[/red]")
-            raise SystemExit(1)
-
-    if use_allowed:
-        allowed = pd.read_parquet(allowed_path)
-        allowed = allowed[(allowed["season"] == season) & (allowed["season_type"] == season_type)]
-        df_allowed = allowed[["team", "week", "rush_allowed"]].copy()
+    
+    # Determine allowed column based on position
+    if position == "RB":
+        allowed_col = "rush_allowed"
+        allowed_path = RAW_DIR / f"team_rush_allowed_{season}_{season_type}.parquet"
+    elif position == "WR":
+        allowed_col = "pass_allowed"
+        allowed_path = RAW_DIR / f"team_pass_allowed_{season}_{season_type}.parquet"
     else:
-        logs = pd.read_parquet(team_path)
-        logs = logs[(logs["season"] == season) & (logs["season_type"] == season_type)]
+        console.print(f"[red]Unsupported position: {position}. Use RB or WR.[/red]")
+        raise SystemExit(1)
+    
+    if not allowed_path.exists():
+        console.print(f"[red]Missing defense data at {allowed_path}. Run fetch first.[/red]")
+        raise SystemExit(1)
 
-        cols = [c for c in logs.columns if "opponent_rushing_yards" in c]
-        if cols:
-            col = cols[0]
-            df_allowed = logs[["team", "week", col]].rename(columns={col: "rush_allowed"})
-        else:
-            # derive from weekly by summing opponent team rushing in each game (requires opponent_team column)
-            weekly = pd.read_parquet(weekly_path)
-            if "opponent_team" not in weekly.columns:
-                console.print("[red]Cannot derive allowed without opponent_team in weekly data[/red]")
-                raise SystemExit(1)
-            team_allowed = weekly.groupby(["opponent_team", "season", "week"], as_index=False)["rushing_yards"].sum()
-            team_allowed = team_allowed.rename(columns={"opponent_team": "team", "rushing_yards": "rush_allowed"})
-            df_allowed = team_allowed[["team", "week", "rush_allowed"]]
+    allowed = pd.read_parquet(allowed_path)
+    allowed = allowed[(allowed["season"] == season) & (allowed["season_type"] == season_type)]
+    df_allowed = allowed[["team", "week", allowed_col]].copy()
 
     # Compute season-to-date arithmetic averages, then take logs for delta
-    team_avg = df_allowed.groupby("team")["rush_allowed"].mean().rename("team_avg").reset_index()
-    league_avg = float(df_allowed["rush_allowed"].mean())
+    team_avg = df_allowed.groupby("team")[allowed_col].mean().rename("team_avg").reset_index()
+    league_avg = float(df_allowed[allowed_col].mean())
     # Multiplicative adjustment in log space: ln(team_avg / league_avg)
     eps = 1e-8
     team_avg["delta_log"] = np.log(team_avg["team_avg"].clip(lower=eps)) - np.log(max(league_avg, eps))
     team_delta = team_avg[["team", "delta_log"]]
 
     out = team_delta.to_dict(orient="records")
-    out_path = PROCESSED_DIR / f"team_defense_delta_{season}_{season_type}.json"
+    out_path = PROCESSED_DIR / f"team_defense_delta_{position}_{season}_{season_type}.json"
     with out_path.open("w") as f:
         json.dump(out, f, indent=2)
-    console.print(f"Saved defense deltas -> {out_path}")
+    console.print(f"Saved {position} defense deltas -> {out_path}")
 
 
 @app.command()
 def predict(
     season: int = typer.Option(2025),
     season_type: str = typer.Option("REG"),
+    position: str = typer.Option("RB", help="Position (RB or WR)"),
     player_id: Optional[str] = typer.Option(None, help="nfl_data_py player_id"),
     player_name: Optional[str] = typer.Option(None, help="Player display name if id unknown"),
     opponent_team: str = typer.Option(..., help="Opponent team code, e.g., DAL, SF"),
@@ -436,10 +475,10 @@ def predict(
 ) -> None:
     """Compute adjusted player distribution vs opponent and probability over a betting line."""
     _ensure_dirs()
-    params_path = PROCESSED_DIR / f"player_lognorm_{season}_{season_type}.json"
-    deltas_path = PROCESSED_DIR / f"team_defense_delta_{season}_{season_type}.json"
+    params_path = PROCESSED_DIR / f"player_lognorm_{position}_{season}_{season_type}.json"
+    deltas_path = PROCESSED_DIR / f"team_defense_delta_{position}_{season}_{season_type}.json"
     if not params_path.exists() or not deltas_path.exists():
-        console.print("[red]Missing processed params or deltas. Run fit_players and defense_adjustments.[/red]")
+        console.print(f"[red]Missing processed params or deltas for {position}. Run fit_players and defense_adjustments.[/red]")
         raise SystemExit(1)
 
     params = pd.DataFrame(json.loads(params_path.read_text()))
@@ -493,6 +532,7 @@ def predict(
 def plot(
     season: int = typer.Option(2025),
     season_type: str = typer.Option("REG"),
+    position: str = typer.Option("RB", help="Position (RB or WR)"),
     player_id: Optional[str] = typer.Option(None),
     player_name: Optional[str] = typer.Option(None),
     opponent_team: Optional[str] = typer.Option(None),
@@ -502,17 +542,17 @@ def plot(
     import matplotlib.pyplot as plt
 
     _ensure_dirs()
-    params_path = PROCESSED_DIR / f"player_lognorm_{season}_{season_type}.json"
-    deltas_path = PROCESSED_DIR / f"team_defense_delta_{season}_{season_type}.json"
+    params_path = PROCESSED_DIR / f"player_lognorm_{position}_{season}_{season_type}.json"
+    deltas_path = PROCESSED_DIR / f"team_defense_delta_{position}_{season}_{season_type}.json"
     if not params_path.exists():
-        fb = PROCESSED_DIR / f"player_lognorm_{season-1}_{season_type}.json"
+        fb = PROCESSED_DIR / f"player_lognorm_{position}_{season-1}_{season_type}.json"
         if fb.exists():
             params_path = fb
         else:
-            console.print("[red]Missing player params JSON. Run fit_players first.[/red]")
+            console.print(f"[red]Missing {position} params JSON. Run fit_players first.[/red]")
             raise SystemExit(1)
     if opponent_team and not deltas_path.exists():
-        fb2 = PROCESSED_DIR / f"team_defense_delta_{season-1}_{season_type}.json"
+        fb2 = PROCESSED_DIR / f"team_defense_delta_{position}_{season-1}_{season_type}.json"
         if fb2.exists():
             deltas_path = fb2
 
@@ -628,6 +668,175 @@ def schedule_lines(
         output = REPORTS_DIR / f"schedule_rb_lines_{season}_{season_type}.csv"
     out_df.to_csv(output, index=False)
     console.print(f"Saved schedule RB lines -> {output}")
+
+
+@app.command()
+def schedule_predictions(
+    season: int = typer.Option(2025),
+    season_type: str = typer.Option("REG"),
+    week: Optional[int] = typer.Option(None, help="Specific week to generate predictions for; if None, all remaining weeks"),
+    top_n: int = typer.Option(30, help="Number of top players to include per position"),
+    output: Optional[Path] = typer.Option(None, help="Output CSV path; defaults to reports/predictions_{season}_{season_type}_week{week}.csv"),
+) -> None:
+    """Build comprehensive predictions spreadsheet with top N RBs and top N WRs for upcoming games."""
+    _ensure_dirs()
+    
+    # Load params and deltas for both positions
+    rb_params_path = PROCESSED_DIR / f"player_lognorm_RB_{season}_{season_type}.json"
+    rb_deltas_path = PROCESSED_DIR / f"team_defense_delta_RB_{season}_{season_type}.json"
+    wr_params_path = PROCESSED_DIR / f"player_lognorm_WR_{season}_{season_type}.json"
+    wr_deltas_path = PROCESSED_DIR / f"team_defense_delta_WR_{season}_{season_type}.json"
+    
+    if not all([rb_params_path.exists(), rb_deltas_path.exists(), wr_params_path.exists(), wr_deltas_path.exists()]):
+        console.print("[red]Missing params or deltas. Run fit_players and defense_adjustments for both RB and WR.[/red]")
+        raise SystemExit(1)
+    
+    rb_params = pd.DataFrame(json.loads(rb_params_path.read_text()))
+    rb_deltas = pd.DataFrame(json.loads(rb_deltas_path.read_text()))
+    wr_params = pd.DataFrame(json.loads(wr_params_path.read_text()))
+    wr_deltas = pd.DataFrame(json.loads(wr_deltas_path.read_text()))
+    
+    # Filter to top N for both positions by expected yards
+    rb_params_sorted = rb_params.sort_values("expected", ascending=False).head(top_n)
+    top_rb_ids = set(rb_params_sorted["player_id"].tolist())
+    
+    wr_params_sorted = wr_params.sort_values("expected", ascending=False).head(top_n)
+    top_wr_ids = set(wr_params_sorted["player_id"].tolist())
+    
+    # Load schedules
+    sched = nr.load_schedules(seasons=[season])
+    sched_pd = sched.to_pandas()
+    sched_pd = sched_pd[sched_pd["game_type"] == season_type]
+    
+    if week is not None:
+        sched_pd = sched_pd[sched_pd["week"] == week]
+    
+    # Load current rosters
+    rost = nr.load_rosters(seasons=[season]).to_pandas()
+    rb_rost = rost[rost["position"] == "RB"][["full_name", "gsis_id", "team"]].drop_duplicates()
+    wr_rost = rost[rost["position"] == "WR"][["full_name", "gsis_id", "team"]].drop_duplicates()
+    
+    def get_delta(team: str, deltas: pd.DataFrame) -> float:
+        row = deltas[deltas["team"] == team]
+        return float(row.iloc[0]["delta_log"]) if not row.empty else 0.0
+    
+    def find_player_params(player_gsis_id: str, player_name: str, params_df: pd.DataFrame) -> Optional[pd.Series]:
+        # Try exact match first
+        row = params_df[params_df["player_id"] == player_gsis_id]
+        if not row.empty:
+            return row.iloc[0]
+        # Fallback: match by last name
+        last_name = player_name.split(" ")[-1]
+        row = params_df[params_df["player_name"].str.contains(last_name, case=False, na=False)]
+        if not row.empty:
+            return row.iloc[0]
+        return None
+    
+    records: List[dict] = []
+    
+    for _, g in sched_pd.iterrows():
+        home = g["home_team"]
+        away = g["away_team"]
+        wk = int(g["week"])
+        game_id = g["game_id"]
+        
+        # Home players face away defense; Away players face home defense
+        home_rb_delta = get_delta(away, rb_deltas)
+        away_rb_delta = get_delta(home, rb_deltas)
+        home_wr_delta = get_delta(away, wr_deltas)
+        away_wr_delta = get_delta(home, wr_deltas)
+        
+        # Process top RBs
+        for team, rb_delta in [(home, home_rb_delta), (away, away_rb_delta)]:
+            team_rbs = rb_rost[rb_rost["team"] == team]
+            for _, r in team_rbs.iterrows():
+                # Only include top N RBs
+                if r["gsis_id"] not in top_rb_ids:
+                    continue
+                    
+                player_params = find_player_params(r["gsis_id"], r["full_name"], rb_params)
+                if player_params is None:
+                    continue
+                
+                mu = float(player_params["mu"]) + rb_delta
+                sigma = float(player_params["sigma"])
+                median = float(np.exp(mu))
+                expected = _expected_from_params(mu, sigma)
+                p75 = _percentiles_from_params(mu, sigma, [0.75])["p75"]
+                
+                records.append({
+                    "game_id": game_id,
+                    "season": season,
+                    "week": wk,
+                    "position": "RB",
+                    "player_id": r["gsis_id"],
+                    "player_name": r["full_name"],
+                    "team": team,
+                    "opponent": home if team == away else away,
+                    "predicted_median": round(median, 1),
+                    "predicted_expected": round(expected, 1),
+                    "predicted_p75": round(p75, 1),
+                })
+        
+        # Process top WRs
+        for team, wr_delta in [(home, home_wr_delta), (away, away_wr_delta)]:
+            team_wrs = wr_rost[wr_rost["team"] == team]
+            for _, r in team_wrs.iterrows():
+                # Only include top N WRs
+                if r["gsis_id"] not in top_wr_ids:
+                    continue
+                    
+                player_params = find_player_params(r["gsis_id"], r["full_name"], wr_params)
+                if player_params is None:
+                    continue
+                
+                mu = float(player_params["mu"]) + wr_delta
+                sigma = float(player_params["sigma"])
+                median = float(np.exp(mu))
+                expected = _expected_from_params(mu, sigma)
+                p75 = _percentiles_from_params(mu, sigma, [0.75])["p75"]
+                
+                records.append({
+                    "game_id": game_id,
+                    "season": season,
+                    "week": wk,
+                    "position": "WR",
+                    "player_id": r["gsis_id"],
+                    "player_name": r["full_name"],
+                    "team": team,
+                    "opponent": home if team == away else away,
+                    "predicted_median": round(median, 1),
+                    "predicted_expected": round(expected, 1),
+                    "predicted_p75": round(p75, 1),
+                })
+    
+    # Create dataframe and split by position
+    all_df = pd.DataFrame(records)
+    rb_df = all_df[all_df["position"] == "RB"].sort_values(["week", "predicted_expected"], ascending=[True, False])
+    wr_df = all_df[all_df["position"] == "WR"].sort_values(["week", "predicted_expected"], ascending=[True, False])
+    
+    # Determine output paths
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    week_str = f"week{week}" if week else "all_weeks"
+    
+    if output is None:
+        rb_output = REPORTS_DIR / f"predictions_RB_{season}_{season_type}_{week_str}.csv"
+        wr_output = REPORTS_DIR / f"predictions_WR_{season}_{season_type}_{week_str}.csv"
+    else:
+        # If custom output provided, append position to filename
+        base = output.stem
+        ext = output.suffix
+        parent = output.parent
+        rb_output = parent / f"{base}_RB{ext}"
+        wr_output = parent / f"{base}_WR{ext}"
+    
+    # Save both files
+    rb_df.to_csv(rb_output, index=False)
+    wr_df.to_csv(wr_output, index=False)
+    
+    console.print(f"[green]Saved RB predictions ({len(rb_df)} player-games) to {rb_output}[/green]")
+    console.print(f"[green]Saved WR predictions ({len(wr_df)} player-games) to {wr_output}[/green]")
+    console.print(f"  Top {top_n} players per position included")
 
 
 def run() -> None:
