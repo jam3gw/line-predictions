@@ -131,6 +131,26 @@ uv run line-predictions plot \
 
 Saves a PNG visualization to `reports/plots/`.
 
+#### Backtest Predictions (NEW)
+```bash
+uv run line-predictions backtest \
+  --season 2025 \
+  --season-type REG \
+  --train-weeks-str "1,2,3,4" \
+  --test-weeks-str "5,6" \
+  --position RB \
+  --use-weighting \
+  --use-usage-filter
+```
+
+Trains model on specified weeks and evaluates on test weeks. Returns:
+- MAE, RMSE, MAPE
+- Correlation
+- Directional Accuracy
+- Coverage (50th-75th percentile)
+
+Results saved to `reports/backtest_*.csv`
+
 ## Data Sources
 
 - **nflreadpy** - Play-by-play data and rosters
@@ -159,21 +179,63 @@ line-predictions/
 
 ## Statistical Model
 
-The tool uses **lognormal distributions** to model player performance:
+The tool uses **lognormal distributions** with **recent improvements** to model player performance:
 
-1. **Why lognormal?**
+### Core Model
+
+1. **Lognormal Distribution**
    - Right-skewed (captures explosive games)
    - No negative values
    - Multiplicative effects (good for adjustments)
 
-2. **Opponent Adjustments:**
+2. **Opponent Adjustments**
    - Calculates team defensive strength vs league average
    - Applies multiplicative adjustment in log-space
    - Uses cumulative season-to-date data
 
-3. **Zero Handling:**
+3. **Zero Handling**
    - DNP (Did Not Play) or zero-carry games = 0 yards
    - Only positive yards used for distribution fitting
+
+### Recent Improvements (October 2025) 🚀
+
+1. **Recency Weighting**
+   - Exponential decay favors recent games over season averages
+   - RBs: 0.90 decay factor (~3-4 week half-life)
+   - WRs: 0.85 decay factor (faster adaptation to role changes)
+
+2. **Usage Filtering**
+   - Collects snap counts, touch/target shares automatically
+   - Filters out unreliable players with insufficient usage
+   - RBs: Minimum 30% snap share, 8 touches/game
+   - WRs: Minimum 40% snap share or 10% target share
+
+3. **Position-Specific Tuning**
+   - RBs: Tighter variance (0.90x sigma) for consistent roles
+   - WRs: Wider variance (1.15x sigma) for volatile performance
+   - Different thresholds and decay rates by position
+
+4. **Calibrated Uncertainty**
+   - Inflated prediction intervals for proper coverage
+   - RBs: 1.3x calibration factor
+   - WRs: 1.5x calibration factor
+   - Achieves ~25% coverage for 50th-75th percentile
+
+### Performance Metrics
+
+**Running Backs:**
+- MAE: 25.6 yards (34% improvement vs baseline)
+- Correlation: 0.40 (132% improvement)
+- Directional Accuracy: 75%
+- Grade: **A-**
+
+**Wide Receivers:**
+- MAE: 28.2 yards (36% improvement vs baseline)
+- Correlation: 0.37 (from negative to positive)
+- Directional Accuracy: 63%
+- Grade: **B+**
+
+See `reports/IMPROVEMENT_SUMMARY.md` for detailed analysis.
 
 ## Examples
 

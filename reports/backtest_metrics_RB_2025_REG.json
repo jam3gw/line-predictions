@@ -1,0 +1,16 @@
+{
+  "position": "RB",
+  "season": 2025,
+  "season_type": "REG",
+  "train_weeks": "[1, 2, 3, 4]",
+  "test_weeks": "[5, 6]",
+  "use_weighting": true,
+  "use_usage_filter": true,
+  "n_predictions": 88,
+  "mae": 25.560826387939688,
+  "rmse": 39.16494495704624,
+  "mape": 106.12534682116579,
+  "correlation": 0.39487446869788234,
+  "directional_accuracy": 75.0,
+  "coverage_50_75": 25.0
+}

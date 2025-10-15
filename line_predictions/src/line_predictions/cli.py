@@ -44,6 +44,25 @@ PFR_TO_STD: Dict[str, str] = {
 
 PFR_TEAMS: List[str] = list(PFR_TO_STD.keys())
 
+# Position-specific configuration
+RB_CONFIG = {
+    "recency_decay": 0.90,           # Exponential decay for recency weighting
+    "min_snap_pct": 0.30,            # Minimum 30% snap share in recent games
+    "min_games": 3,                  # Minimum games played
+    "sigma_adjust": 0.90,            # Reduce variance (tighter distribution)
+    "min_touches_per_game": 8,       # Minimum touches (rush + receptions)
+    "sigma_calibration": 1.3,        # Inflate sigma for better coverage
+}
+
+WR_CONFIG = {
+    "recency_decay": 0.85,           # Faster decay for WRs (roles change quicker)
+    "min_snap_pct": 0.40,            # Minimum 40% snap share
+    "min_target_share": 0.10,        # Or 10% target share
+    "min_games": 3,                  # Minimum games played
+    "sigma_adjust": 1.15,            # Increase variance (wider distribution)
+    "sigma_calibration": 1.5,        # Larger inflation for WRs
+}
+
 
 def _ensure_dirs() -> None:
     for d in [DATA_DIR, RAW_DIR, PROCESSED_DIR, REPORTS_DIR, PLOTS_DIR]:
@@ -73,6 +92,49 @@ def _fit_lognormal_from_yards(yards: pd.Series) -> tuple[float, float]:
     return mu, sigma
 
 
+def _fit_lognormal_weighted(yards: pd.Series, weeks: pd.Series, decay_factor: float = 0.9) -> tuple[float, float]:
+    """Fit lognormal parameters with exponential recency weighting.
+    
+    More recent weeks get higher weight: w_i = decay_factor^(max_week - week_i)
+    
+    Args:
+        yards: Yards gained (positive values only used for fitting)
+        weeks: Week numbers corresponding to each yards value
+        decay_factor: Exponential decay factor (0 < decay_factor <= 1)
+                     0.9 = ~3-4 week half-life, 0.85 = ~2-3 week half-life
+    
+    Returns:
+        (mu, sigma) parameters for lognormal distribution
+    """
+    eps = 1e-8
+    
+    # Filter to positive yards only
+    mask = (yards > 0) & (yards.notna())
+    if not mask.any():
+        return float(np.log(eps)), float(eps)
+    
+    pos_yards = yards[mask].values
+    pos_weeks = weeks[mask].values
+    
+    # Calculate recency weights
+    max_week = pos_weeks.max()
+    weights = np.power(decay_factor, max_week - pos_weeks)
+    weights = weights / weights.sum()  # Normalize
+    
+    # Weighted mean and std in log-space
+    log_yards = np.log(pos_yards)
+    mu_weighted = float(np.sum(weights * log_yards))
+    
+    # Weighted variance
+    var_weighted = float(np.sum(weights * (log_yards - mu_weighted) ** 2))
+    sigma_weighted = float(np.sqrt(var_weighted))
+    
+    # Ensure minimum sigma for numerical stability
+    sigma_weighted = max(sigma_weighted, eps)
+    
+    return mu_weighted, sigma_weighted
+
+
 def _expected_from_params(mu: float, sigma: float) -> float:
     # E[X] for lognormal with parameters mu, sigma
     return float(np.exp(mu + 0.5 * sigma * sigma))
@@ -81,6 +143,18 @@ def _expected_from_params(mu: float, sigma: float) -> float:
 def _percentiles_from_params(mu: float, sigma: float, ps: List[float]) -> dict[str, float]:
     scale = float(np.exp(mu))
     return {f"p{int(p*100)}": float(lognorm.ppf(p, sigma, scale=scale)) for p in ps}
+
+
+def _percentiles_from_params_calibrated(mu: float, sigma: float, ps: List[float], position: str) -> dict[str, float]:
+    """Compute percentiles with calibrated sigma for better coverage.
+    
+    Inflates sigma based on position to match empirical prediction intervals.
+    """
+    config = RB_CONFIG if position == "RB" else WR_CONFIG
+    calibration = config["sigma_calibration"]
+    sigma_cal = sigma * calibration
+    scale = float(np.exp(mu))
+    return {f"p{int(p*100)}": float(lognorm.ppf(p, sigma_cal, scale=scale)) for p in ps}
 
 
 def _pfr_fetch_rb_roster(season: int) -> List[Tuple[str, str]]:
@@ -310,6 +384,128 @@ def fetch(
         pass_allowed["season_type"] = season_type
         pass_allowed.to_parquet(RAW_DIR / f"team_pass_allowed_{season}_{season_type}.parquet")
         console.print("[green]Saved team pass defense allowed via nflreadpy[/green]")
+        
+        # === NEW: Calculate usage metrics for RBs ===
+        console.print("[bold]Calculating RB usage metrics...[/bold]")
+        
+        # Count snaps per player per game
+        rb_snaps = pbp_df[pbp_df["rusher_player_id"].notna()].groupby([
+            "season", "week", "rusher_player_id", "posteam"
+        ]).size().reset_index(name="snap_count")
+        
+        # Count total team snaps per game
+        team_snaps = pbp_df.groupby(["season", "week", "posteam"]).size().reset_index(name="team_snaps")
+        
+        # Merge to get snap percentage
+        rb_snaps = rb_snaps.merge(team_snaps, on=["season", "week", "posteam"], how="left")
+        rb_snaps["snap_pct"] = rb_snaps["snap_count"] / rb_snaps["team_snaps"]
+        
+        # Count rush attempts and targets for RBs
+        rb_rushes = rush_df[rush_df["rusher_player_id"].notna()].groupby([
+            "season", "week", "rusher_player_id", "posteam"
+        ]).size().reset_index(name="rush_attempts")
+        
+        rb_targets = pass_df[pass_df["receiver_player_id"].notna()].groupby([
+            "season", "week", "receiver_player_id", "posteam"
+        ]).size().reset_index(name="targets")
+        
+        # Merge with roster to filter to RBs only
+        rb_snaps_filt = rb_snaps.merge(rosters, left_on="rusher_player_id", right_on="gsis_id", how="left")
+        rb_snaps_filt = rb_snaps_filt[rb_snaps_filt["position"] == "RB"]
+        
+        # Merge usage metrics
+        rb_usage = rb_snaps_filt[["season", "week", "rusher_player_id", "posteam", "snap_count", "snap_pct"]].copy()
+        rb_usage = rb_usage.merge(rb_rushes, left_on=["season", "week", "rusher_player_id", "posteam"],
+                                   right_on=["season", "week", "rusher_player_id", "posteam"], how="left")
+        rb_usage = rb_usage.merge(rb_targets, left_on=["season", "week", "rusher_player_id"],
+                                   right_on=["season", "week", "receiver_player_id"], how="left",
+                                   suffixes=("", "_target"))
+        
+        # Drop duplicate posteam columns from merge
+        if "posteam_target" in rb_usage.columns:
+            rb_usage = rb_usage.drop(columns=["posteam_target"])
+        
+        rb_usage["rush_attempts"] = rb_usage["rush_attempts"].fillna(0)
+        rb_usage["targets"] = rb_usage["targets"].fillna(0)
+        rb_usage["touches"] = rb_usage["rush_attempts"] + rb_usage["targets"]
+        
+        # Calculate team-level touch share
+        team_touches = rb_usage.groupby(["season", "week", "posteam"])["touches"].sum().reset_index(name="team_touches")
+        rb_usage = rb_usage.merge(team_touches, on=["season", "week", "posteam"], how="left")
+        rb_usage["touch_share"] = rb_usage["touches"] / rb_usage["team_touches"].clip(lower=1)
+        
+        rb_usage_out = rb_usage.assign(
+            player_id=lambda d: d["rusher_player_id"],
+            recent_team=lambda d: d["posteam"],
+            season_type=season_type,
+        )[["player_id", "season", "season_type", "week", "recent_team", 
+           "snap_count", "snap_pct", "rush_attempts", "targets", "touches", "touch_share"]]
+        
+        rb_usage_out.to_parquet(RAW_DIR / f"weekly_RB_usage_{season}_{season_type}.parquet")
+        console.print("[green]Saved RB usage metrics[/green]")
+        
+        # === NEW: Calculate usage metrics for WRs ===
+        console.print("[bold]Calculating WR usage metrics...[/bold]")
+        
+        # Count snaps for WRs (approximate by plays where they're involved)
+        wr_snaps = pbp_df[pbp_df["receiver_player_id"].notna()].groupby([
+            "season", "week", "receiver_player_id", "posteam"
+        ]).size().reset_index(name="snap_count")
+        
+        wr_snaps = wr_snaps.merge(team_snaps, on=["season", "week", "posteam"], how="left")
+        wr_snaps["snap_pct"] = wr_snaps["snap_count"] / wr_snaps["team_snaps"]
+        
+        # Filter to WRs only
+        wr_snaps_filt = wr_snaps.merge(rosters, left_on="receiver_player_id", right_on="gsis_id", how="left")
+        wr_snaps_filt = wr_snaps_filt[wr_snaps_filt["position"] == "WR"]
+        
+        # WR targets
+        wr_targets_agg = pass_df[pass_df["receiver_player_id"].notna()].groupby([
+            "season", "week", "receiver_player_id", "posteam"
+        ]).size().reset_index(name="targets")
+        
+        # Calculate team target share
+        team_targets = wr_targets_agg.groupby(["season", "week", "posteam"])["targets"].sum().reset_index(name="team_targets")
+        wr_targets_agg = wr_targets_agg.merge(team_targets, on=["season", "week", "posteam"], how="left")
+        wr_targets_agg["target_share"] = wr_targets_agg["targets"] / wr_targets_agg["team_targets"].clip(lower=1)
+        
+        # Air yards share (if available)
+        if "air_yards" in pass_df.columns:
+            wr_air = pass_df[pass_df["receiver_player_id"].notna()].groupby([
+                "season", "week", "receiver_player_id", "posteam"
+            ])["air_yards"].sum().reset_index(name="air_yards")
+            
+            team_air = wr_air.groupby(["season", "week", "posteam"])["air_yards"].sum().reset_index(name="team_air_yards")
+            wr_air = wr_air.merge(team_air, on=["season", "week", "posteam"], how="left")
+            wr_air["air_yards_share"] = wr_air["air_yards"] / wr_air["team_air_yards"].clip(lower=1)
+        else:
+            wr_air = pd.DataFrame()
+        
+        # Merge WR usage metrics
+        wr_usage = wr_snaps_filt[["season", "week", "receiver_player_id", "posteam", "snap_count", "snap_pct"]].copy()
+        wr_usage = wr_usage.merge(wr_targets_agg[["season", "week", "receiver_player_id", "posteam", "targets", "target_share"]], 
+                                  on=["season", "week", "receiver_player_id", "posteam"], how="left")
+        
+        if not wr_air.empty:
+            wr_usage = wr_usage.merge(wr_air[["season", "week", "receiver_player_id", "air_yards", "air_yards_share"]], 
+                                      on=["season", "week", "receiver_player_id"], how="left")
+        else:
+            wr_usage["air_yards"] = 0
+            wr_usage["air_yards_share"] = 0
+        
+        wr_usage["targets"] = wr_usage["targets"].fillna(0)
+        wr_usage["target_share"] = wr_usage["target_share"].fillna(0)
+        
+        wr_usage_out = wr_usage.assign(
+            player_id=lambda d: d["receiver_player_id"],
+            recent_team=lambda d: d["posteam"],
+            season_type=season_type,
+        )[["player_id", "season", "season_type", "week", "recent_team", 
+           "snap_count", "snap_pct", "targets", "target_share", "air_yards", "air_yards_share"]]
+        
+        wr_usage_out.to_parquet(RAW_DIR / f"weekly_WR_usage_{season}_{season_type}.parquet")
+        console.print("[green]Saved WR usage metrics[/green]")
+        
     except Exception as e:
         console.print(f"[red]nflreadpy failed for {season}: {e}")
         raise
@@ -320,21 +516,36 @@ def fit_players(
     season: int = typer.Option(2025),
     season_type: str = typer.Option("REG"),
     position_filter: str = typer.Option("RB", help="Filter to position group (e.g., RB, WR)"),
+    use_weighting: bool = typer.Option(True, help="Use recency weighting (exponential decay)"),
+    use_usage_filter: bool = typer.Option(True, help="Filter players by minimum usage thresholds"),
 ) -> None:
-    """Fit per-player lognormal params (mu, sigma) from weekly yards and save processed JSON."""
+    """Fit per-player lognormal params (mu, sigma) from weekly yards with improvements."""
     _ensure_dirs()
+    
+    # Get position-specific config
+    config = RB_CONFIG if position_filter == "RB" else WR_CONFIG if position_filter == "WR" else None
+    if config is None:
+        console.print(f"[red]Unsupported position: {position_filter}. Use RB or WR.[/red]")
+        raise SystemExit(1)
+    
+    console.print(f"[bold]Fitting {position_filter} players with improved algorithm[/bold]")
+    console.print(f"  Recency weighting: {use_weighting} (decay={config['recency_decay']})")
+    console.print(f"  Usage filtering: {use_usage_filter}")
+    console.print(f"  Sigma adjustment: {config['sigma_adjust']}x")
     
     # Determine yards column and allowed file based on position
     if position_filter == "RB":
         yards_col = "rushing_yards"
         allowed_col = "rush_allowed"
         allowed_path = RAW_DIR / f"team_rush_allowed_{season}_{season_type}.parquet"
+        usage_path = RAW_DIR / f"weekly_RB_usage_{season}_{season_type}.parquet"
     elif position_filter == "WR":
         yards_col = "receiving_yards"
         allowed_col = "pass_allowed"
         allowed_path = RAW_DIR / f"team_pass_allowed_{season}_{season_type}.parquet"
+        usage_path = RAW_DIR / f"weekly_WR_usage_{season}_{season_type}.parquet"
     else:
-        console.print(f"[red]Unsupported position: {position_filter}. Use RB or WR.[/red]")
+        console.print(f"[red]Unsupported position: {position_filter}.[/red]")
         raise SystemExit(1)
     
     weekly_path = RAW_DIR / f"weekly_{position_filter}_{season}_{season_type}.parquet"
@@ -345,14 +556,21 @@ def fit_players(
     weekly = pd.read_parquet(weekly_path)
     weekly = weekly[(weekly["season"] == season) & (weekly["season_type"] == season_type)]
     weekly = weekly[weekly["position"] == position_filter]
+    
+    # Load usage data if available and filtering is enabled
+    usage_df = None
+    if use_usage_filter and usage_path.exists():
+        usage_df = pd.read_parquet(usage_path)
+        usage_df = usage_df[(usage_df["season"] == season) & (usage_df["season_type"] == season_type)]
+        console.print(f"[green]Loaded usage data: {len(usage_df)} player-week records[/green]")
 
-    # Opponent normalization: scale each game's yards by opponent's season-to-date defensive strength up to prior week
+    # Opponent normalization: scale each game's yards by opponent's season-to-date defensive strength
     if allowed_path.exists() and not weekly.empty and "opponent_team" in weekly.columns:
         allowed = pd.read_parquet(allowed_path)
         allowed = allowed[(allowed["season"] == season) & (allowed["season_type"] == season_type)]
         allowed = allowed[["team", "week", allowed_col]].copy()
         # Team cumulative mean up to prior week
-        allowed = allowed.sort_values(["team", "week"])  # ensure order
+        allowed = allowed.sort_values(["team", "week"])
         allowed["team_cum_sum"] = allowed.groupby("team")[allowed_col].cumsum().shift(1)
         allowed["team_cum_cnt"] = allowed.groupby("team").cumcount()
         allowed["team_cum_mean_prev"] = allowed["team_cum_sum"] / allowed["team_cum_cnt"].replace(0, np.nan)
@@ -375,10 +593,13 @@ def fit_players(
     else:
         weekly["yards_adj"] = weekly[yards_col].clip(lower=0)
 
-    # Densify weeks: ensure every player has an entry for each week with 0 yards if missing (DNP/zero carries)
+    # Merge with usage data
+    if usage_df is not None:
+        weekly = weekly.merge(usage_df, on=["player_id", "season", "season_type", "week"], how="left")
+
+    # Densify weeks: ensure every player has an entry for each week
     if not weekly.empty:
         all_weeks = sorted(weekly["week"].unique().tolist())
-        # Keep player name/display
         player_meta = weekly.groupby("player_id").agg({
             "player_name": "first",
             "player_display_name": "first",
@@ -390,6 +611,14 @@ def fit_players(
             present = grp[["week", "yards_adj"]].set_index("week")
             reindexed = present.reindex(all_weeks, fill_value=0).reset_index().rename(columns={"index": "week"})
             reindexed.insert(0, "player_id", pid)
+            
+            # If usage data available, merge it back
+            if usage_df is not None and "snap_pct" in grp.columns:
+                usage_cols = ["week"] + [c for c in grp.columns if c in ["snap_pct", "touch_share", "target_share", "touches", "targets"]]
+                usage_present = grp[usage_cols].set_index("week")
+                usage_reindexed = usage_present.reindex(all_weeks, fill_value=0).reset_index()
+                reindexed = reindexed.merge(usage_reindexed, on="week", how="left")
+            
             grids.append(reindexed)
         dense = pd.concat(grids, ignore_index=True)
         weekly = dense.merge(player_meta, on="player_id", how="left")
@@ -397,21 +626,83 @@ def fit_players(
         weekly["season_type"] = season_type
         weekly["position"] = position_filter
 
+    # Fit models for each player
     results = []
+    filtered_count = 0
+    
     for player_id, grp in weekly.groupby("player_id"):
         player_name = grp["player_display_name"].iloc[0] if "player_display_name" in grp else grp["player_name"].iloc[0]
         yards = grp["yards_adj"].fillna(0).clip(lower=0)
-        mu, sigma = _fit_lognormal_from_yards(yards)
+        weeks = grp["week"]
+        
+        # Apply usage filtering
+        if use_usage_filter and usage_df is not None and "snap_pct" in grp.columns:
+            games_played = (yards > 0).sum()
+            
+            if position_filter == "RB":
+                # Check snap percentage and touches
+                recent_snaps = grp[grp["snap_pct"] > 0]["snap_pct"].tail(4)  # Last 4 games
+                avg_snap_pct = recent_snaps.mean() if len(recent_snaps) > 0 else 0
+                
+                avg_touches = grp[grp["touches"] > 0]["touches"].mean() if "touches" in grp.columns and (grp["touches"] > 0).any() else 0
+                
+                # Filter criteria: min games, min snap %, min touches
+                # Relax filtering: Only filter if ALL criteria fail badly
+                if games_played < config["min_games"] and avg_snap_pct < (config["min_snap_pct"] / 2) and avg_touches < (config["min_touches_per_game"] / 2):
+                    filtered_count += 1
+                    continue
+            
+            elif position_filter == "WR":
+                # Check snap percentage or target share
+                recent_snaps = grp[grp["snap_pct"] > 0]["snap_pct"].tail(4) if (grp["snap_pct"] > 0).any() else pd.Series([0])
+                avg_snap_pct = recent_snaps.mean() if len(recent_snaps) > 0 else 0
+                
+                recent_targets = grp[grp["target_share"] > 0]["target_share"].tail(4) if "target_share" in grp.columns and (grp["target_share"] > 0).any() else pd.Series([0])
+                avg_target_share = recent_targets.mean() if len(recent_targets) > 0 else 0
+                
+                # Filter criteria: min games AND (min snap % OR min target share)
+                # Relax filtering: Only filter if really low usage
+                if games_played < config["min_games"] and avg_snap_pct < (config["min_snap_pct"] / 2) and avg_target_share < (config["min_target_share"] / 2):
+                    filtered_count += 1
+                    continue
+        
+        # Fit lognormal with or without weighting
+        if use_weighting:
+            mu, sigma = _fit_lognormal_weighted(yards, weeks, decay_factor=config["recency_decay"])
+        else:
+            mu, sigma = _fit_lognormal_from_yards(yards)
+        
+        # Apply position-specific sigma adjustment
+        sigma = sigma * config["sigma_adjust"]
+        
+        # Calculate metrics
         expected = _expected_from_params(mu, sigma)
-        percentiles = _percentiles_from_params(mu, sigma, [0.1, 0.25, 0.5, 0.75, 0.9])
-        results.append({
+        percentiles = _percentiles_from_params_calibrated(mu, sigma, [0.1, 0.25, 0.5, 0.75, 0.9], position_filter)
+        
+        # Store additional metadata
+        result = {
             "player_id": player_id,
             "player_name": player_name,
             "mu": mu,
             "sigma": sigma,
             "expected": expected,
+            "games_played": int((yards > 0).sum()),
             **percentiles,
-        })
+        }
+        
+        # Add usage metrics if available
+        if usage_df is not None:
+            if position_filter == "RB" and "snap_pct" in grp.columns:
+                result["avg_snap_pct"] = float(grp[grp["snap_pct"] > 0]["snap_pct"].mean()) if (grp["snap_pct"] > 0).any() else 0
+                result["avg_touch_share"] = float(grp[grp["touch_share"] > 0]["touch_share"].mean()) if "touch_share" in grp.columns and (grp["touch_share"] > 0).any() else 0
+            elif position_filter == "WR" and "target_share" in grp.columns:
+                result["avg_snap_pct"] = float(grp[grp["snap_pct"] > 0]["snap_pct"].mean()) if "snap_pct" in grp.columns and (grp["snap_pct"] > 0).any() else 0
+                result["avg_target_share"] = float(grp[grp["target_share"] > 0]["target_share"].mean()) if (grp["target_share"] > 0).any() else 0
+        
+        results.append(result)
+
+    console.print(f"[yellow]Filtered out {filtered_count} players due to low usage[/yellow]")
+    console.print(f"[green]Fit models for {len(results)} players[/green]")
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PROCESSED_DIR / f"player_lognorm_{position_filter}_{season}_{season_type}.json"
@@ -837,6 +1128,214 @@ def schedule_predictions(
     console.print(f"[green]Saved RB predictions ({len(rb_df)} player-games) to {rb_output}[/green]")
     console.print(f"[green]Saved WR predictions ({len(wr_df)} player-games) to {wr_output}[/green]")
     console.print(f"  Top {top_n} players per position included")
+
+
+@app.command()
+def backtest(
+    season: int = typer.Option(2025),
+    season_type: str = typer.Option("REG"),
+    train_weeks_str: str = typer.Option("1,2,3,4", help="Comma-separated training weeks"),
+    test_weeks_str: str = typer.Option("5,6", help="Comma-separated test weeks"),
+    position: str = typer.Option("RB", help="Position to backtest (RB or WR)"),
+    use_weighting: bool = typer.Option(True, help="Use recency weighting"),
+    use_usage_filter: bool = typer.Option(True, help="Apply usage filtering"),
+) -> None:
+    """Backtest predictions by training on train_weeks and evaluating on test_weeks."""
+    _ensure_dirs()
+    
+    console.print(f"[bold]Backtesting {position} predictions[/bold]")
+    
+    # Parse week ranges
+    train_weeks = [int(w.strip()) for w in train_weeks_str.split(",")]
+    test_weeks = [int(w.strip()) for w in test_weeks_str.split(",")]
+    
+    console.print(f"Training weeks: {train_weeks}")
+    console.print(f"Test weeks: {test_weeks}")
+    
+    # Determine file paths
+    if position == "RB":
+        yards_col = "rushing_yards"
+        weekly_path = RAW_DIR / f"weekly_RB_{season}_{season_type}.parquet"
+        usage_path = RAW_DIR / f"weekly_RB_usage_{season}_{season_type}.parquet"
+    elif position == "WR":
+        yards_col = "receiving_yards"
+        weekly_path = RAW_DIR / f"weekly_WR_{season}_{season_type}.parquet"
+        usage_path = RAW_DIR / f"weekly_WR_usage_{season}_{season_type}.parquet"
+    else:
+        console.print(f"[red]Unsupported position: {position}[/red]")
+        raise SystemExit(1)
+    
+    if not weekly_path.exists():
+        console.print(f"[red]Missing weekly data at {weekly_path}. Run fetch first.[/red]")
+        raise SystemExit(1)
+    
+    # Load full data
+    weekly_full = pd.read_parquet(weekly_path)
+    weekly_full = weekly_full[(weekly_full["season"] == season) & (weekly_full["season_type"] == season_type)]
+    
+    # Load usage data if available
+    usage_df = None
+    if usage_path.exists():
+        usage_df = pd.read_parquet(usage_path)
+        usage_df = usage_df[(usage_df["season"] == season) & (usage_df["season_type"] == season_type)]
+    
+    # Split into train and test
+    train_data = weekly_full[weekly_full["week"].isin(train_weeks)].copy()
+    test_data = weekly_full[weekly_full["week"].isin(test_weeks)].copy()
+    
+    console.print(f"Train data: {len(train_data)} records")
+    console.print(f"Test data: {len(test_data)} records")
+    
+    # Train models on train_weeks using simplified logic
+    console.print("[bold]Training models...[/bold]")
+    
+    config = RB_CONFIG if position == "RB" else WR_CONFIG
+    player_models = {}
+    
+    for player_id, grp in train_data.groupby("player_id"):
+        yards = grp[yards_col].fillna(0).clip(lower=0)
+        weeks = grp["week"]
+        
+        # Apply usage filtering if enabled (relaxed for backtesting)
+        if use_usage_filter and usage_df is not None:
+            usage_grp = usage_df[usage_df["player_id"] == player_id]
+            if not usage_grp.empty:
+                games_played = (yards > 0).sum()
+                # Relax min_games check for short training periods
+                min_games_threshold = min(config["min_games"], len(train_weeks) - 1)
+                if games_played < min_games_threshold:
+                    continue
+                
+                if position == "RB" and "snap_pct" in usage_grp.columns:
+                    avg_snap_pct = usage_grp[usage_grp["snap_pct"] > 0]["snap_pct"].mean() if (usage_grp["snap_pct"] > 0).any() else 0
+                    avg_touches = usage_grp["touches"].mean() if "touches" in usage_grp.columns else 0
+                    # Relaxed thresholds for backtesting
+                    if avg_snap_pct < (config["min_snap_pct"] / 2) and avg_touches < (config["min_touches_per_game"] / 2):
+                        continue
+                elif position == "WR" and "target_share" in usage_grp.columns:
+                    avg_snap_pct = usage_grp[usage_grp["snap_pct"] > 0]["snap_pct"].mean() if "snap_pct" in usage_grp.columns and (usage_grp["snap_pct"] > 0).any() else 0
+                    avg_target_share = usage_grp[usage_grp["target_share"] > 0]["target_share"].mean() if (usage_grp["target_share"] > 0).any() else 0
+                    # Relaxed thresholds for backtesting
+                    if avg_snap_pct < (config["min_snap_pct"] / 2) and avg_target_share < (config["min_target_share"] / 2):
+                        continue
+        
+        # Fit model
+        if use_weighting:
+            mu, sigma = _fit_lognormal_weighted(yards, weeks, decay_factor=config["recency_decay"])
+        else:
+            mu, sigma = _fit_lognormal_from_yards(yards)
+        
+        sigma = sigma * config["sigma_adjust"]
+        
+        player_models[player_id] = {
+            "mu": mu,
+            "sigma": sigma,
+            "player_name": grp["player_name"].iloc[0] if "player_name" in grp.columns else grp["player_display_name"].iloc[0]
+        }
+    
+    console.print(f"[green]Trained {len(player_models)} player models[/green]")
+    
+    # Generate predictions for test weeks
+    console.print("[bold]Generating predictions for test weeks...[/bold]")
+    
+    predictions = []
+    actuals = []
+    
+    for _, row in test_data.iterrows():
+        player_id = row["player_id"]
+        if player_id not in player_models:
+            continue
+        
+        model = player_models[player_id]
+        mu = model["mu"]
+        sigma = model["sigma"]
+        
+        # Simple prediction without defensive adjustment for now
+        predicted_median = float(np.exp(mu))
+        predicted_expected = _expected_from_params(mu, sigma)
+        predicted_p75 = _percentiles_from_params_calibrated(mu, sigma, [0.75], position)["p75"]
+        
+        actual_yards = float(row[yards_col])
+        
+        predictions.append({
+            "player_id": player_id,
+            "player_name": model["player_name"],
+            "week": int(row["week"]),
+            "predicted_median": predicted_median,
+            "predicted_expected": predicted_expected,
+            "predicted_p75": predicted_p75,
+            "actual_yards": actual_yards,
+        })
+        
+        actuals.append(actual_yards)
+    
+    if not predictions:
+        console.print("[red]No predictions generated. Check that players exist in both train and test sets.[/red]")
+        raise SystemExit(1)
+    
+    # Calculate evaluation metrics
+    pred_df = pd.DataFrame(predictions)
+    actual_arr = np.array(actuals)
+    predicted_expected_arr = pred_df["predicted_expected"].values
+    predicted_median_arr = pred_df["predicted_median"].values
+    predicted_p75_arr = pred_df["predicted_p75"].values
+    
+    mae = np.mean(np.abs(actual_arr - predicted_expected_arr))
+    rmse = np.sqrt(np.mean((actual_arr - predicted_expected_arr) ** 2))
+    mape = np.mean(np.abs((actual_arr - predicted_expected_arr) / (actual_arr + 1))) * 100
+    correlation = np.corrcoef(actual_arr, predicted_expected_arr)[0, 1]
+    
+    # Directional accuracy
+    league_median = np.median(actual_arr)
+    pred_over_median = predicted_expected_arr > league_median
+    actual_over_median = actual_arr > league_median
+    directional_accuracy = np.mean(pred_over_median == actual_over_median) * 100
+    
+    # Coverage (% of actuals within median to p75)
+    within_interval = np.sum((actual_arr >= predicted_median_arr) & (actual_arr <= predicted_p75_arr))
+    coverage = (within_interval / len(actual_arr)) * 100
+    
+    # Print results
+    console.print("\n" + "=" * 60)
+    console.print(f"[bold green]BACKTEST RESULTS: {position} (Train: weeks {train_weeks}, Test: weeks {test_weeks})[/bold green]")
+    console.print("=" * 60)
+    console.print(f"\nPredictions generated: {len(predictions)}")
+    console.print(f"\n[bold]Performance Metrics:[/bold]")
+    console.print(f"  MAE:                    {mae:.2f} yards")
+    console.print(f"  RMSE:                   {rmse:.2f} yards")
+    console.print(f"  MAPE:                   {mape:.2f}%")
+    console.print(f"  Correlation:            {correlation:.3f}")
+    console.print(f"  Directional Accuracy:   {directional_accuracy:.1f}%")
+    console.print(f"  Coverage (50-75th):     {coverage:.1f}%")
+    console.print("=" * 60)
+    
+    # Save results
+    output_file = REPORTS_DIR / f"backtest_{position}_{season}_{season_type}_train{min(train_weeks)}-{max(train_weeks)}_test{min(test_weeks)}-{max(test_weeks)}.csv"
+    pred_df.to_csv(output_file, index=False)
+    console.print(f"\n[green]Saved backtest results to {output_file}[/green]")
+    
+    # Save summary metrics
+    metrics_dict = {
+        "position": position,
+        "season": season,
+        "season_type": season_type,
+        "train_weeks": str(train_weeks),
+        "test_weeks": str(test_weeks),
+        "use_weighting": use_weighting,
+        "use_usage_filter": use_usage_filter,
+        "n_predictions": len(predictions),
+        "mae": mae,
+        "rmse": rmse,
+        "mape": mape,
+        "correlation": correlation,
+        "directional_accuracy": directional_accuracy,
+        "coverage_50_75": coverage,
+    }
+    
+    metrics_file = REPORTS_DIR / f"backtest_metrics_{position}_{season}_{season_type}.json"
+    with metrics_file.open("w") as f:
+        json.dump(metrics_dict, f, indent=2)
+    console.print(f"[green]Saved metrics to {metrics_file}[/green]")
 
 
 def run() -> None:
