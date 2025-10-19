@@ -1,0 +1,108 @@
+================================================================================
+MODEL IMPROVEMENT TESTING
+Testing 3 ideas against Week 6 (train: 1-5, test: 6)
+================================================================================
+
+================================================================================
+IDEA 1: SIGMA CALIBRATION
+================================================================================
+
+Testing sigma_calibration = 1.0...
+  RB: MAE=23.7, Corr=0.546, Cov=28.0%
+  WR: MAE=30.5, Corr=0.278, Cov=15.6%
+
+Testing sigma_calibration = 1.2...
+  RB: MAE=23.7, Corr=0.546, Cov=28.0%
+  WR: MAE=30.5, Corr=0.278, Cov=19.5%
+
+Testing sigma_calibration = 1.4...
+  RB: MAE=23.7, Corr=0.546, Cov=28.0%
+  WR: MAE=30.5, Corr=0.278, Cov=24.7%
+
+Testing sigma_calibration = 1.6...
+  RB: MAE=23.7, Corr=0.546, Cov=30.0%
+  WR: MAE=30.5, Corr=0.278, Cov=28.6%
+
+Testing sigma_calibration = 1.8...
+  RB: MAE=23.7, Corr=0.546, Cov=32.0%
+  WR: MAE=30.5, Corr=0.278, Cov=29.9%
+
+Testing sigma_calibration = 2.0...
+  RB: MAE=23.7, Corr=0.546, Cov=32.0%
+  WR: MAE=30.5, Corr=0.278, Cov=32.5%
+
+================================================================================
+IDEA 2: SIGMA ADJUSTMENT (Base Variance)
+================================================================================
+
+Testing RB sigma_adjust = 0.8, WR = 1.15 (baseline)...
+  RB: MAE=23.3, Corr=0.534
+
+Testing RB sigma_adjust = 0.85, WR = 1.15 (baseline)...
+  RB: MAE=23.5, Corr=0.540
+
+Testing RB sigma_adjust = 0.9, WR = 1.15 (baseline)...
+  RB: MAE=23.7, Corr=0.546
+
+Testing RB sigma_adjust = 0.95, WR = 1.15 (baseline)...
+  RB: MAE=24.0, Corr=0.552
+
+Testing RB sigma_adjust = 1.0, WR = 1.15 (baseline)...
+  RB: MAE=24.3, Corr=0.557
+
+Testing WR sigma_adjust = 1.0, RB = 0.90 (baseline)...
+  WR: MAE=30.0, Corr=0.286
+
+Testing WR sigma_adjust = 1.05, RB = 0.90 (baseline)...
+  WR: MAE=30.1, Corr=0.284
+
+Testing WR sigma_adjust = 1.1, RB = 0.90 (baseline)...
+  WR: MAE=30.3, Corr=0.281
+
+Testing WR sigma_adjust = 1.15, RB = 0.90 (baseline)...
+  WR: MAE=30.5, Corr=0.278
+
+Testing WR sigma_adjust = 1.2, RB = 0.90 (baseline)...
+  WR: MAE=30.8, Corr=0.273
+
+Testing WR sigma_adjust = 1.25, RB = 0.90 (baseline)...
+  WR: MAE=31.1, Corr=0.269
+
+================================================================================
+IDEA 3: USAGE THRESHOLDS
+================================================================================
+
+Testing Baseline: RB snap=0.3, touch=8, WR snap=0.4, target=0.1...
+  RB: N=50, MAE=23.7, Corr=0.546
+  WR: N=77, MAE=30.5, Corr=0.278
+
+Testing More Lenient: RB snap=0.25, touch=6, WR snap=0.35, target=0.08...
+  RB: N=51, MAE=23.4, Corr=0.557
+  WR: N=77, MAE=30.5, Corr=0.278
+
+Testing More Strict: RB snap=0.35, touch=10, WR snap=0.45, target=0.12...
+  RB: N=45, MAE=25.2, Corr=0.482
+  WR: N=76, MAE=30.8, Corr=0.265
+
+Testing Very Lenient: RB snap=0.2, touch=5, WR snap=0.3, target=0.06...
+  RB: N=52, MAE=23.2, Corr=0.568
+  WR: N=77, MAE=30.5, Corr=0.278
+
+================================================================================
+TOP 10 CONFIGURATIONS
+================================================================================
+             idea    rb_mae  rb_corr  rb_coverage    wr_mae  wr_corr  wr_coverage  combined_score
+sigma_calibration 23.697436 0.545538    32.000000 30.456012 0.277599    32.467532        0.180794
+sigma_calibration 23.697436 0.545538    32.000000 30.456012 0.277599    29.870130        0.170405
+sigma_calibration 23.697436 0.545538    30.000000 30.456012 0.277599    28.571429        0.157210
+  wr_sigma_adjust 23.697436 0.545538    28.000000 30.756746 0.273449    28.571429        0.147084
+ usage_thresholds 23.168332 0.567530    26.923077 30.456012 0.277599    27.272727        0.146959
+ usage_thresholds 23.378543 0.556719    27.450980 30.456012 0.277599    27.272727        0.145267
+  rb_sigma_adjust 23.261071 0.533889    28.000000 30.456012 0.277599    27.272727        0.144449
+  rb_sigma_adjust 23.462289 0.539627    28.000000 30.456012 0.277599    27.272727        0.144304
+  wr_sigma_adjust 23.697436 0.545538    28.000000 30.456012 0.277599    27.272727        0.144015
+  rb_sigma_adjust 23.697436 0.545538    28.000000 30.456012 0.277599    27.272727        0.144015
+
+✓ Results saved to /Users/Macbook/Documents/Github-Projects/line-predictions/reports/test_*.csv
+
+✓ Original configuration restored

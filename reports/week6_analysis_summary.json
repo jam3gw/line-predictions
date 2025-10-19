@@ -1,0 +1,30 @@
+{
+  "RB": {
+    "position": "RB",
+    "n_predictions": 24,
+    "mae": 41.9125,
+    "rmse": 49.29796733470188,
+    "mape": 144.31233741797695,
+    "correlation": 0.2097655203917478,
+    "directional_accuracy": 58.333333333333336,
+    "coverage_median_p75": 16.666666666666664,
+    "coverage_p25_p75": null,
+    "league_median_actual": 56.0,
+    "mean_actual": 63.958333333333336,
+    "mean_predicted": 85.49583333333334
+  },
+  "WR": {
+    "position": "WR",
+    "n_predictions": 22,
+    "mae": 53.67272727272727,
+    "rmse": 62.62013181949484,
+    "mape": 161.88805380191545,
+    "correlation": -0.1357249852159737,
+    "directional_accuracy": 45.45454545454545,
+    "coverage_median_p75": 13.636363636363635,
+    "coverage_p25_p75": null,
+    "league_median_actual": 39.0,
+    "mean_actual": 57.45454545454545,
+    "mean_predicted": 80.83636363636364
+  }
+}
