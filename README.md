@@ -44,7 +44,25 @@ The package will be installed automatically with all dependencies.
 
 All commands should be run from the `line_predictions/` directory.
 
-### Complete Workflow
+### Quick Start (Recommended)
+
+Generate predictions for any week with a single command:
+
+```bash
+uv run line-predictions generate-predictions --season 2025 --season-type REG --week 7
+```
+
+This automatically runs the entire pipeline:
+1. Fetches latest data
+2. Fits player models (RB & WR) with the advanced algorithm
+3. Calculates defense adjustments
+4. Generates predictions
+
+**Output:** Two CSV files in `reports/`:
+- `predictions_RB_2025_REG_week7.csv` - Top 30 RB predictions
+- `predictions_WR_2025_REG_week7.csv` - Top 30 WR predictions
+
+### Complete Workflow (Manual Steps)
 
 To generate predictions for a specific week, run these commands in order:
 
@@ -99,9 +117,18 @@ Each prediction CSV contains:
 - `player_name` - Player full name
 - `team` - Player's team
 - `opponent` - Opponent team
+- `predicted_p25` - 25th percentile (lower bound of middle 50% range)
 - `predicted_median` - 50th percentile (fair betting line)
+- `predicted_p75` - 75th percentile (upper bound of middle 50% range)
 - `predicted_expected` - Mean expected yards
-- `predicted_p75` - 75th percentile
+
+**Using the Middle 50% Range for Betting:**
+
+The p25-p75 range represents where the player has a 50% chance to land. Use this to identify high-confidence betting opportunities:
+
+- **Line < p25** → Take the **OVER** (high confidence) - Only 25% chance of going under
+- **Line > p75** → Take the **UNDER** (high confidence) - Only 25% chance of going over
+- **Line between p25-p75** → Lower confidence, close to 50/50
 
 ### Additional Commands
 

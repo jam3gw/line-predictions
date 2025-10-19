@@ -1053,7 +1053,9 @@ def schedule_predictions(
                 sigma = float(player_params["sigma"])
                 median = float(np.exp(mu))
                 expected = _expected_from_params(mu, sigma)
-                p75 = _percentiles_from_params(mu, sigma, [0.75])["p75"]
+                percentiles = _percentiles_from_params(mu, sigma, [0.25, 0.75])
+                p25 = percentiles["p25"]
+                p75 = percentiles["p75"]
                 
                 records.append({
                     "game_id": game_id,
@@ -1064,9 +1066,10 @@ def schedule_predictions(
                     "player_name": r["full_name"],
                     "team": team,
                     "opponent": home if team == away else away,
+                    "predicted_p25": round(p25, 1),
                     "predicted_median": round(median, 1),
-                    "predicted_expected": round(expected, 1),
                     "predicted_p75": round(p75, 1),
+                    "predicted_expected": round(expected, 1),
                 })
         
         # Process top WRs
@@ -1085,7 +1088,9 @@ def schedule_predictions(
                 sigma = float(player_params["sigma"])
                 median = float(np.exp(mu))
                 expected = _expected_from_params(mu, sigma)
-                p75 = _percentiles_from_params(mu, sigma, [0.75])["p75"]
+                percentiles = _percentiles_from_params(mu, sigma, [0.25, 0.75])
+                p25 = percentiles["p25"]
+                p75 = percentiles["p75"]
                 
                 records.append({
                     "game_id": game_id,
@@ -1096,9 +1101,10 @@ def schedule_predictions(
                     "player_name": r["full_name"],
                     "team": team,
                     "opponent": home if team == away else away,
+                    "predicted_p25": round(p25, 1),
                     "predicted_median": round(median, 1),
-                    "predicted_expected": round(expected, 1),
                     "predicted_p75": round(p75, 1),
+                    "predicted_expected": round(expected, 1),
                 })
     
     # Create dataframe and split by position
@@ -1336,6 +1342,81 @@ def backtest(
     with metrics_file.open("w") as f:
         json.dump(metrics_dict, f, indent=2)
     console.print(f"[green]Saved metrics to {metrics_file}[/green]")
+
+
+@app.command()
+def generate_predictions(
+    season: int = typer.Option(2025, help="Season year"),
+    season_type: str = typer.Option("REG", help="Season type: REG or POST"),
+    week: int = typer.Option(..., help="Week to generate predictions for"),
+    top_n: int = typer.Option(30, help="Number of top players per position"),
+) -> None:
+    """Run complete pipeline: fetch data, fit models, adjust for defense, and generate predictions.
+    
+    This is a convenience command that runs all steps in sequence:
+    1. Fetch latest data
+    2. Fit player models (RB and WR) with advanced algorithm
+    3. Calculate defense adjustments (rush and pass)
+    4. Generate predictions for the specified week
+    """
+    _ensure_dirs()
+    
+    console.print("[bold cyan]Starting complete prediction pipeline...[/bold cyan]")
+    console.print(f"Season: {season} {season_type}, Week: {week}, Top N: {top_n}\n")
+    
+    try:
+        # Step 1: Fetch data
+        console.print("[bold yellow]Step 1/6: Fetching latest data...[/bold yellow]")
+        fetch(season=season, season_type=season_type)
+        console.print("[green]✓ Data fetch complete[/green]\n")
+        
+        # Step 2: Fit RB models
+        console.print("[bold yellow]Step 2/6: Fitting RB player models (advanced algorithm)...[/bold yellow]")
+        fit_players(
+            season=season,
+            season_type=season_type,
+            position_filter="RB",
+            use_weighting=True,
+            use_usage_filter=True,
+        )
+        console.print("[green]✓ RB models fitted[/green]\n")
+        
+        # Step 3: Fit WR models
+        console.print("[bold yellow]Step 3/6: Fitting WR player models (advanced algorithm)...[/bold yellow]")
+        fit_players(
+            season=season,
+            season_type=season_type,
+            position_filter="WR",
+            use_weighting=True,
+            use_usage_filter=True,
+        )
+        console.print("[green]✓ WR models fitted[/green]\n")
+        
+        # Step 4: Defense adjustments (RB)
+        console.print("[bold yellow]Step 4/6: Calculating rush defense adjustments...[/bold yellow]")
+        defense_adjustments(season=season, season_type=season_type, position="RB")
+        console.print("[green]✓ Rush defense adjustments calculated[/green]\n")
+        
+        # Step 5: Defense adjustments (WR)
+        console.print("[bold yellow]Step 5/6: Calculating pass defense adjustments...[/bold yellow]")
+        defense_adjustments(season=season, season_type=season_type, position="WR")
+        console.print("[green]✓ Pass defense adjustments calculated[/green]\n")
+        
+        # Step 6: Generate predictions
+        console.print("[bold yellow]Step 6/6: Generating predictions...[/bold yellow]")
+        schedule_predictions(season=season, season_type=season_type, week=week, top_n=top_n)
+        
+        console.print("\n[bold green]✓ Pipeline complete![/bold green]")
+        console.print(f"\nPredictions saved to:")
+        console.print(f"  - reports/predictions_RB_{season}_{season_type}_week{week}.csv")
+        console.print(f"  - reports/predictions_WR_{season}_{season_type}_week{week}.csv")
+        console.print(f"\n[bold]Tip:[/bold] Look for betting lines outside the p25-p75 range for high-confidence plays:")
+        console.print(f"  • Line < p25 → Take the OVER (high confidence)")
+        console.print(f"  • Line > p75 → Take the UNDER (high confidence)")
+        
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Pipeline failed: {e}[/bold red]")
+        raise
 
 
 def run() -> None:
