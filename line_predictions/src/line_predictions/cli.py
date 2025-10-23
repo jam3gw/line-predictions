@@ -1404,7 +1404,14 @@ def generate_predictions(
         
         # Step 6: Generate predictions
         console.print("[bold yellow]Step 6/6: Generating predictions...[/bold yellow]")
-        schedule_predictions(season=season, season_type=season_type, week=week, top_n=top_n)
+        # Pass output=None explicitly to avoid Typer's OptionInfo default when called programmatically
+        schedule_predictions(
+            season=season,
+            season_type=season_type,
+            week=week,
+            top_n=top_n,
+            output=None,
+        )
         
         console.print("\n[bold green]✓ Pipeline complete![/bold green]")
         console.print(f"\nPredictions saved to:")
