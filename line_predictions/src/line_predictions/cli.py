@@ -987,9 +987,33 @@ def schedule_predictions(
     wr_params = pd.DataFrame(json.loads(wr_params_path.read_text()))
     wr_deltas = pd.DataFrame(json.loads(wr_deltas_path.read_text()))
     
-    # Filter to top N for both positions by expected yards
-    rb_params_sorted = rb_params.sort_values("expected", ascending=False).head(top_n)
-    top_rb_ids = set(rb_params_sorted["player_id"].tolist())
+    # Determine top N RBs by rushing attempts per game (season-to-date; up to prior week if specified).
+    rb_usage_path = RAW_DIR / f"weekly_RB_usage_{season}_{season_type}.parquet"
+    top_rb_ids: set[str]
+    if rb_usage_path.exists():
+        rb_usage = pd.read_parquet(rb_usage_path)
+        rb_usage = rb_usage[(rb_usage["season"] == season) & (rb_usage["season_type"] == season_type)]
+        usage_scope = rb_usage.copy()
+        if week is not None and "week" in usage_scope.columns:
+            # Use data up to the week BEFORE the target week to avoid leakage
+            prior = usage_scope[usage_scope["week"] < week]
+            usage_scope = prior if not prior.empty else usage_scope[usage_scope["week"] <= week]
+        if not usage_scope.empty:
+            attempts_sum = usage_scope.groupby("player_id")["rush_attempts"].sum()
+            games_with_attempts = usage_scope.groupby("player_id")["rush_attempts"].size().clip(lower=1)
+            attempts_per_game = (attempts_sum / games_with_attempts).sort_values(ascending=False)
+            # Keep only players that we have model params for
+            param_player_ids = set(rb_params["player_id"].tolist())
+            ranked_ids = [pid for pid in attempts_per_game.index if pid in param_player_ids]
+            top_rb_ids = set(ranked_ids[:top_n])
+        else:
+            # Fallback to expected yards if no usage rows in scope
+            rb_params_sorted = rb_params.sort_values("expected", ascending=False).head(top_n)
+            top_rb_ids = set(rb_params_sorted["player_id"].tolist())
+    else:
+        # Fallback if usage file missing
+        rb_params_sorted = rb_params.sort_values("expected", ascending=False).head(top_n)
+        top_rb_ids = set(rb_params_sorted["player_id"].tolist())
     
     wr_params_sorted = wr_params.sort_values("expected", ascending=False).head(top_n)
     top_wr_ids = set(wr_params_sorted["player_id"].tolist())
