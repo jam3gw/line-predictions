@@ -8,40 +8,26 @@ NFL rushing (RB) and receiving (WR) yards prediction system using statistical mo
 
 ## Quick Command Reference
 
-### Main Command (All-in-One)
+### Main Command (One Command to Rule Them All)
 ```bash
 cd line_predictions
-uv run line-predictions generate-predictions --season 2025 --season-type REG --week 7
+uv run line-predictions predict 9
 ```
 
-### Individual Steps (if needed)
+That's it! This single command:
+1. Fetches latest data
+2. Fits RB & WR models with advanced algorithm
+3. Calculates defense adjustments
+4. Generates predictions with injury risk warnings
+
+**Options:**
 ```bash
-# 1. Fetch data
-uv run line-predictions fetch --season 2025 --season-type REG
-
-# 2. Fit player models (with advanced algorithm)
-uv run line-predictions fit-players --season 2025 --season-type REG --position-filter RB --use-weighting --use-usage-filter
-uv run line-predictions fit-players --season 2025 --season-type REG --position-filter WR --use-weighting --use-usage-filter
-
-# 3. Calculate defense adjustments
-uv run line-predictions defense-adjustments --season 2025 --season-type REG --position RB
-uv run line-predictions defense-adjustments --season 2025 --season-type REG --position WR
-
-# 4. Generate predictions
-uv run line-predictions schedule-predictions --season 2025 --season-type REG --week 7 --top-n 30
+uv run line-predictions predict 9 --season 2025 --season-type REG --top-n 30
 ```
 
-### Other Useful Commands
-```bash
-# Backtest the model
-uv run line-predictions backtest --season 2025 --season-type REG --train-weeks-str "1,2,3,4" --test-weeks-str "5,6" --position RB
-
-# Single player prediction
-uv run line-predictions predict --season 2025 --season-type REG --position RB --player-name "Derrick Henry" --opponent-team "KC" --line 75.5
-
-# Plot player distribution
-uv run line-predictions plot --season 2025 --season-type REG --position RB --player-name "Derrick Henry" --opponent-team "KC" --line 75.5
-```
+### Output
+- `reports/predictions_RB_2025_REG_week9.csv`
+- `reports/predictions_WR_2025_REG_week9.csv`
 
 ## Directory Structure
 
@@ -152,6 +138,8 @@ Each prediction includes:
 | `predicted_median` | 50th percentile | Fair betting line (50/50) |
 | `predicted_p75` | 75th percentile | Upper bound of middle 50% |
 | `predicted_expected` | Mean (E[X]) | Expected value (used for ranking) |
+| `injury_risk` | Risk level | none / low / medium / high |
+| `injury_note` | Risk explanation | Details about usage drops |
 
 ### Betting Strategy: Middle 50% Range
 

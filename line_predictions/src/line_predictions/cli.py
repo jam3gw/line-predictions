@@ -754,8 +754,8 @@ def defense_adjustments(
     console.print(f"Saved {position} defense deltas -> {out_path}")
 
 
-@app.command()
-def predict(
+@app.command("predict-single")
+def predict_single(
     season: int = typer.Option(2025),
     season_type: str = typer.Option("REG"),
     position: str = typer.Option("RB", help="Position (RB or WR)"),
@@ -1226,8 +1226,8 @@ def backtest(
         yards = grp[yards_col].fillna(0).clip(lower=0)
         weeks = grp["week"]
         
-        # Apply usage filtering if enabled (relaxed for backtesting)
-        if use_usage_filter and usage_df is not None:
+        # Apply usage filtering (relaxed for backtesting)
+        if usage_df is not None:
             usage_grp = usage_df[usage_df["player_id"] == player_id]
             if not usage_grp.empty:
                 games_played = (yards > 0).sum()
@@ -1249,11 +1249,8 @@ def backtest(
                     if avg_snap_pct < (config["min_snap_pct"] / 2) and avg_target_share < (config["min_target_share"] / 2):
                         continue
         
-        # Fit model
-        if use_weighting:
-            mu, sigma = _fit_lognormal_weighted(yards, weeks, decay_factor=config["recency_decay"])
-        else:
-            mu, sigma = _fit_lognormal_from_yards(yards)
+        # Fit model with recency weighting
+        mu, sigma = _fit_lognormal_weighted(yards, weeks, decay_factor=config["recency_decay"])
         
         sigma = sigma * config["sigma_adjust"]
         
@@ -1369,24 +1366,41 @@ def backtest(
 
 
 @app.command()
-def generate_predictions(
+def predict(
+    week: int = typer.Argument(..., help="Week number to generate predictions for"),
     season: int = typer.Option(2025, help="Season year"),
-    season_type: str = typer.Option("REG", help="Season type: REG or POST"),
-    week: int = typer.Option(..., help="Week to generate predictions for"),
+    season_type: str = typer.Option("REG", help="Season type (REG or POST)"),
     top_n: int = typer.Option(30, help="Number of top players per position"),
 ) -> None:
-    """Run complete pipeline: fetch data, fit models, adjust for defense, and generate predictions.
+    """🏈 Generate NFL player performance predictions with advanced statistical modeling.
     
-    This is a convenience command that runs all steps in sequence:
-    1. Fetch latest data
-    2. Fit player models (RB and WR) with advanced algorithm
-    3. Calculate defense adjustments (rush and pass)
-    4. Generate predictions for the specified week
+    This runs the complete prediction pipeline:
+    
+    1. Fetches latest data from nflreadpy
+    2. Fits player models with recency weighting & usage filtering
+    3. Calculates opponent defense adjustments
+    4. Generates predictions for the specified week
+    
+    Example:
+        uv run line-predictions predict 9
+        
+    Advanced Algorithm Features:
+    
+    • Recency Weighting: Recent games weighted higher (RB: 0.90, WR: 0.85 decay)
+    • Usage Filtering: Filters unreliable players by snap share & touches
+    • Opponent Adjustments: Adjusts for defensive strength vs league average
+    • Position-Specific: Separate tuning for RB vs WR variance
+    
+    Betting Strategy:
+    
+    • Line < p25 → HIGH CONFIDENCE OVER (only 25% chance under)
+    • Line > p75 → HIGH CONFIDENCE UNDER (only 25% chance over)
+    • p25 ≤ Line ≤ p75 → Lower confidence (close to 50/50)
     """
     _ensure_dirs()
     
-    console.print("[bold cyan]Starting complete prediction pipeline...[/bold cyan]")
-    console.print(f"Season: {season} {season_type}, Week: {week}, Top N: {top_n}\n")
+    console.print("[bold cyan]🏈 NFL Prediction Pipeline (Advanced Algorithm)[/bold cyan]")
+    console.print(f"Season: {season} {season_type}, Week: {week}, Top {top_n} per position\n")
     
     try:
         # Step 1: Fetch data
@@ -1438,12 +1452,12 @@ def generate_predictions(
         )
         
         console.print("\n[bold green]✓ Pipeline complete![/bold green]")
-        console.print(f"\nPredictions saved to:")
-        console.print(f"  - reports/predictions_RB_{season}_{season_type}_week{week}.csv")
-        console.print(f"  - reports/predictions_WR_{season}_{season_type}_week{week}.csv")
-        console.print(f"\n[bold]Tip:[/bold] Look for betting lines outside the p25-p75 range for high-confidence plays:")
-        console.print(f"  • Line < p25 → Take the OVER (high confidence)")
-        console.print(f"  • Line > p75 → Take the UNDER (high confidence)")
+        console.print(f"\n📊 Predictions saved to:")
+        console.print(f"  • reports/predictions_RB_{season}_{season_type}_week{week}.csv")
+        console.print(f"  • reports/predictions_WR_{season}_{season_type}_week{week}.csv")
+        console.print(f"\n[bold]💡 Betting Tip:[/bold] Look for lines outside the p25-p75 range:")
+        console.print(f"  • Line < p25 → Take OVER (high confidence)")
+        console.print(f"  • Line > p75 → Take UNDER (high confidence)")
         
     except Exception as e:
         console.print(f"\n[bold red]✗ Pipeline failed: {e}[/bold red]")

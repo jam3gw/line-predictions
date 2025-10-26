@@ -1,13 +1,15 @@
 # line-predictions
 
-NFL rushing and receiving yards predictions using statistical modeling (lognormal distributions) with opponent defense adjustments.
+NFL player performance predictions using advanced statistical modeling (lognormal distributions) with recency weighting, usage filtering, opponent adjustments, and injury risk detection.
 
 ## Overview
 
-This tool predicts player performance by:
-1. Fitting lognormal distributions to historical weekly yard data
-2. Adjusting predictions based on opponent defensive strength
-3. Generating probabilistic predictions (median, expected, percentiles)
+Predict RB rushing yards and WR receiving yards with a sophisticated algorithm that considers:
+- **Recency Weighting** - Recent games weighted exponentially higher
+- **Usage Filtering** - Only reliable players with sufficient snap share
+- **Opponent Adjustments** - Defensive strength vs league average
+- **Injury Detection** - Flags players with unusual usage drops
+- **Position-Specific** - Separate tuning for RB vs WR variance
 
 **Positions supported:**
 - **RB** - Rushing yards
@@ -42,225 +44,131 @@ The package will be installed automatically with all dependencies.
 
 ## Usage
 
-All commands should be run from the `line_predictions/` directory.
+### 🚀 One Command - Generate Predictions
 
-### Quick Start (Recommended)
-
-Generate predictions for any week with a single command:
+Run everything with a single command:
 
 ```bash
-uv run line-predictions generate-predictions --season 2025 --season-type REG --week 7
+uv run line-predictions predict 9
 ```
 
-This automatically runs the entire pipeline:
-1. Fetches latest data
-2. Fits player models (RB & WR) with the advanced algorithm
-3. Calculates defense adjustments
-4. Generates predictions
+That's it! This command automatically:
+1. ✅ Fetches latest data from nflreadpy
+2. ✅ Fits RB & WR models with advanced algorithm
+3. ✅ Calculates defense adjustments
+4. ✅ Generates predictions with injury risk warnings
+
+**Options:**
+```bash
+uv run line-predictions predict 9 --season 2025 --season-type REG --top-n 30
+```
 
 **Output:** Two CSV files in `reports/`:
-- `predictions_RB_2025_REG_week7.csv` - Top 30 RB predictions
-- `predictions_WR_2025_REG_week7.csv` - Top 30 WR predictions
+- `predictions_RB_2025_REG_week9.csv` - Top 30 RB predictions
+- `predictions_WR_2025_REG_week9.csv` - Top 30 WR predictions
 
-### Complete Workflow (Manual Steps)
+### 📊 Output Format
 
-To generate predictions for a specific week, run these commands in order:
+Each prediction includes:
 
-#### 1. Fetch Data
-```bash
-uv run line-predictions fetch --season 2025 --season-type REG
+| Column | Description | Use Case |
+|--------|-------------|----------|
+| `player_name` | Player full name | |
+| `team` | Player's team | |
+| `opponent` | Opponent team | |
+| `predicted_p25` | 25th percentile | Lower bound of middle 50% |
+| `predicted_median` | 50th percentile | Fair betting line (50/50) |
+| `predicted_p75` | 75th percentile | Upper bound of middle 50% |
+| `predicted_expected` | Mean (E[X]) | Expected value |
+| `injury_risk` | Risk level | none / low / medium / high |
+| `injury_note` | Risk explanation | Usage drop details |
+
+### 🎯 Betting Strategy: Middle 50% Range
+
+The **p25-p75 range** represents a 50% confidence interval:
+
+- **Line < p25** → **HIGH CONFIDENCE OVER** ✅ - Only 25% chance of going under
+- **Line > p75** → **HIGH CONFIDENCE UNDER** ✅ - Only 25% chance of going over
+- **p25 ≤ Line ≤ p75** → **Lower confidence** ⚠️ - Close to 50/50
+
+**Example:**
+```
+Player: Josh Jacobs
+p25: 62.3 yards
+Median: 85.7 yards
+p75: 115.4 yards
+
+Betting Line: 55.5 yards → HIGH CONFIDENCE OVER (line < p25)
+Betting Line: 125.5 yards → HIGH CONFIDENCE UNDER (line > p75)
+Betting Line: 80.5 yards → Lower confidence (inside range)
 ```
 
-This fetches:
-- Weekly RB rushing yards
-- Weekly WR receiving yards
-- Team rush defense allowed
-- Team pass defense allowed
+### ⚠️ Injury Risk Levels
 
-#### 2. Fit Player Models (RBs)
-```bash
-uv run line-predictions fit-players --season 2025 --season-type REG --position-filter RB
-```
+- **high** - Very low usage last week (possible injury/inactive)
+- **medium** - Significant drop in snap share from season average
+- **low** - Below average snap share
+- **none** - Normal usage
 
-#### 3. Fit Player Models (WRs)
-```bash
-uv run line-predictions fit-players --season 2025 --season-type REG --position-filter WR
-```
+## Advanced Algorithm Features
 
-#### 4. Calculate Defense Adjustments (Rush)
-```bash
-uv run line-predictions defense-adjustments --season 2025 --season-type REG --position RB
-```
+### 1. Recency Weighting
+- Exponential decay favors recent games
+- **RBs:** 0.90 decay (~3-4 week half-life)
+- **WRs:** 0.85 decay (~2-3 week half-life for faster role changes)
+- Recent performance weighted much higher than season averages
 
-#### 5. Calculate Defense Adjustments (Pass)
-```bash
-uv run line-predictions defense-adjustments --season 2025 --season-type REG --position WR
-```
+### 2. Usage Filtering
+- Automatically filters unreliable players
+- **RBs:** Minimum 30% snap share, 8 touches/game
+- **WRs:** Minimum 40% snap share OR 10% target share
+- Only includes players with 3+ games played
 
-#### 6. Generate Predictions
-```bash
-uv run line-predictions schedule-predictions --season 2025 --season-type REG --week 6 --top-n 30
-```
+### 3. Opponent Adjustments
+- Season-to-date cumulative defensive strength vs league average
+- Multiplicative adjustment in log-space: `adj_mu = mu + delta_log`
+- Delta = `ln(league_avg / team_avg)` yards allowed
+- Tougher defenses → lower predictions, weaker defenses → higher predictions
 
-This creates two separate CSV files:
-- `reports/predictions_RB_2025_REG_week6.csv` - Top 30 RB rushing yard predictions
-- `reports/predictions_WR_2025_REG_week6.csv` - Top 30 WR receiving yard predictions
+### 4. Injury Detection
+- Monitors snap percentage and touch/target trends
+- Flags significant usage drops from season average
+- Identifies players with very low recent usage
+- **HIGH risk** = Possible injury or inactive status
 
-### Output Format
-
-Each prediction CSV contains:
-- `game_id` - Unique game identifier
-- `season` - Season year
-- `week` - Week number
-- `position` - Player position (RB or WR)
-- `player_id` - Player GSIS ID
-- `player_name` - Player full name
-- `team` - Player's team
-- `opponent` - Opponent team
-- `predicted_p25` - 25th percentile (lower bound of middle 50% range)
-- `predicted_median` - 50th percentile (fair betting line)
-- `predicted_p75` - 75th percentile (upper bound of middle 50% range)
-- `predicted_expected` - Mean expected yards
-
-**Using the Middle 50% Range for Betting:**
-
-The p25-p75 range represents where the player has a 50% chance to land. Use this to identify high-confidence betting opportunities:
-
-- **Line < p25** → Take the **OVER** (high confidence) - Only 25% chance of going under
-- **Line > p75** → Take the **UNDER** (high confidence) - Only 25% chance of going over
-- **Line between p25-p75** → Lower confidence, close to 50/50
-
-### Additional Commands
-
-#### Predict Single Player
-```bash
-uv run line-predictions predict \
-  --season 2025 \
-  --season-type REG \
-  --position RB \
-  --player-name "Derrick Henry" \
-  --opponent-team "KC" \
-  --line 75.5
-```
-
-Returns probability of going over the specified line.
-
-#### Plot Player Distribution
-```bash
-uv run line-predictions plot \
-  --season 2025 \
-  --season-type REG \
-  --position RB \
-  --player-name "Derrick Henry" \
-  --opponent-team "KC" \
-  --line 75.5
-```
-
-Saves a PNG visualization to `reports/plots/`.
-
-#### Backtest Predictions (NEW)
-```bash
-uv run line-predictions backtest \
-  --season 2025 \
-  --season-type REG \
-  --train-weeks-str "1,2,3,4" \
-  --test-weeks-str "5,6" \
-  --position RB \
-  --use-weighting \
-  --use-usage-filter
-```
-
-Trains model on specified weeks and evaluates on test weeks. Returns:
-- MAE, RMSE, MAPE
-- Correlation
-- Directional Accuracy
-- Coverage (50th-75th percentile)
-
-Results saved to `reports/backtest_*.csv`
-
-## Data Sources
-
-- **nflreadpy** - Play-by-play data and rosters
-- **Pro Football Reference** - Historical team and player data (fallback)
-
-## Directory Structure
-
-```
-line-predictions/
-├── line_predictions/           # Package directory
-│   ├── src/
-│   │   └── line_predictions/
-│   │       ├── __init__.py
-│   │       └── cli.py         # Main CLI implementation
-│   ├── pyproject.toml         # Package configuration
-│   └── uv.lock                # Dependency lock file
-├── data/
-│   ├── raw/                   # Fetched data (parquet files)
-│   └── processed/             # Fitted models (JSON files)
-├── reports/
-│   ├── predictions_RB_*.csv   # RB predictions
-│   ├── predictions_WR_*.csv   # WR predictions
-│   └── plots/                 # Visualization outputs
-└── README.md
-```
+### 5. Position-Specific Tuning
+- **RBs:** Tighter variance (0.90x sigma) - consistent workload
+- **WRs:** Wider variance (1.15x sigma) - volatile game-to-game
+- Different recency decay and usage thresholds by position
 
 ## Statistical Model
 
-The tool uses **lognormal distributions** with **recent improvements** to model player performance:
+Uses **lognormal distributions** because:
+- Right-skewed (captures explosive games)
+- No negative values (yards ≥ 0)
+- Multiplicative effects work naturally in log-space
+- Realistic for sports performance data
 
-### Core Model
+**Key Parameters:**
+- `mu` - Log-space mean
+- `sigma` - Log-space standard deviation (adjusted by position)
+- Percentiles calculated with calibrated sigma for proper coverage
 
-1. **Lognormal Distribution**
-   - Right-skewed (captures explosive games)
-   - No negative values
-   - Multiplicative effects (good for adjustments)
+## Performance Metrics
 
-2. **Opponent Adjustments**
-   - Calculates team defensive strength vs league average
-   - Applies multiplicative adjustment in log-space
-   - Uses cumulative season-to-date data
+### Running Backs
+- **MAE:** 25.6 yards (34% improvement vs baseline)
+- **Correlation:** 0.40 (132% improvement)
+- **Directional Accuracy:** 75%
+- **Coverage (50-75th):** ~25%
+- **Grade:** A-
 
-3. **Zero Handling**
-   - DNP (Did Not Play) or zero-carry games = 0 yards
-   - Only positive yards used for distribution fitting
-
-### Recent Improvements (October 2025) 🚀
-
-1. **Recency Weighting**
-   - Exponential decay favors recent games over season averages
-   - RBs: 0.90 decay factor (~3-4 week half-life)
-   - WRs: 0.85 decay factor (faster adaptation to role changes)
-
-2. **Usage Filtering**
-   - Collects snap counts, touch/target shares automatically
-   - Filters out unreliable players with insufficient usage
-   - RBs: Minimum 30% snap share, 8 touches/game
-   - WRs: Minimum 40% snap share or 10% target share
-
-3. **Position-Specific Tuning**
-   - RBs: Tighter variance (0.90x sigma) for consistent roles
-   - WRs: Wider variance (1.15x sigma) for volatile performance
-   - Different thresholds and decay rates by position
-
-4. **Calibrated Uncertainty**
-   - Inflated prediction intervals for proper coverage
-   - RBs: 1.3x calibration factor
-   - WRs: 1.5x calibration factor
-   - Achieves ~25% coverage for 50th-75th percentile
-
-### Performance Metrics
-
-**Running Backs:**
-- MAE: 25.6 yards (34% improvement vs baseline)
-- Correlation: 0.40 (132% improvement)
-- Directional Accuracy: 75%
-- Grade: **A-**
-
-**Wide Receivers:**
-- MAE: 28.2 yards (36% improvement vs baseline)
-- Correlation: 0.37 (from negative to positive)
-- Directional Accuracy: 63%
-- Grade: **B+**
+### Wide Receivers
+- **MAE:** 28.2 yards (36% improvement vs baseline)
+- **Correlation:** 0.37 (from negative to positive)
+- **Directional Accuracy:** 63%
+- **Coverage (50-75th):** ~25%
+- **Grade:** B+
 
 See `reports/IMPROVEMENT_SUMMARY.md` for detailed analysis.
 
@@ -278,6 +186,36 @@ See `reports/IMPROVEMENT_SUMMARY.md` for detailed analysis.
 2. Jaxon Smith-Njigba (SEA) - 104.9 median vs JAX
 3. Zay Flowers (BAL) - 67.5 median vs LA
 
+## Data Sources
+
+- **nflreadpy** - Play-by-play data, schedules, and rosters
+- Automatically fetches:
+  - Weekly player performance (yards)
+  - Usage metrics (snaps, touches, targets)
+  - Team defense allowed
+  - Opponent matchups
+
+## Directory Structure
+
+```
+line-predictions/
+├── line_predictions/           # Package directory
+│   ├── src/
+│   │   └── line_predictions/
+│   │       ├── __init__.py
+│   │       └── cli.py         # Main CLI (simplified)
+│   ├── pyproject.toml         # Package configuration
+│   └── uv.lock                # Dependency lock file
+├── data/
+│   ├── raw/                   # Fetched data (parquet files)
+│   └── processed/             # Fitted models (JSON files)
+├── reports/
+│   ├── predictions_RB_*.csv   # RB predictions
+│   ├── predictions_WR_*.csv   # WR predictions
+│   └── plots/                 # Visualization outputs
+└── README.md
+```
+
 ## Troubleshooting
 
 ### Module Not Found Error
@@ -290,10 +228,12 @@ uv sync
 ```
 
 ### Data Fetch Issues
-Ensure you have internet connection and try with explicit season:
-```bash
-uv run line-predictions fetch --season 2025 --season-type REG
-```
+Ensure you have internet connection. The tool requires active NFL season data from nflreadpy.
+
+### Predictions Look Off
+- Check the `injury_risk` column - players with high risk may be injured
+- Verify you're using data from the correct week
+- Look at the p25-p75 range for confidence level
 
 ## Author
 
