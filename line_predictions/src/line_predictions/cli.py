@@ -87,11 +87,21 @@ def _fetch_injury_data(season: int, week: int) -> Dict[str, Dict[str, str]]:
                         "position": position
                     }
         
-        console.print(f"[green]✓ Fetched injury data for {len(injury_dict)} players[/green]")
+        if injury_dict:
+            console.print(f"[green]✓ Fetched injury data for {len(injury_dict)} players[/green]")
+            # Show sample of injured players
+            sample = list(injury_dict.items())[:5]
+            for name, info in sample:
+                console.print(f"  • {name} ({info['position']}): {info['status']}")
+            if len(injury_dict) > 5:
+                console.print(f"  ... and {len(injury_dict) - 5} more")
+        else:
+            console.print("[yellow]⚠️  No injury data available from ESPN API[/yellow]")
+            console.print("[yellow]   All players will show as ACTIVE - verify injury status manually[/yellow]")
         
     except Exception as e:
         console.print(f"[yellow]⚠️  Could not fetch injury data: {e}[/yellow]")
-        console.print("[yellow]   Continuing without injury adjustments[/yellow]")
+        console.print("[yellow]   All players will show as ACTIVE - verify injury status manually[/yellow]")
     
     return injury_dict
 
@@ -165,6 +175,37 @@ def _fit_lognormal_weighted(yards: pd.Series, weeks: pd.Series, decay_factor: fl
 def _expected_from_params(mu: float, sigma: float) -> float:
     # E[X] for lognormal with parameters mu, sigma
     return float(np.exp(mu + 0.5 * sigma * sigma))
+
+
+def _calculate_confidence(sigma: float, position: str) -> tuple[str, float]:
+    """Calculate confidence level based on prediction uncertainty (sigma).
+    
+    Lower sigma = higher confidence (tighter distribution)
+    Higher sigma = lower confidence (wider distribution)
+    
+    Returns:
+        (confidence_label, confidence_score)
+    """
+    # Confidence score is coefficient of variation (sigma)
+    confidence_score = float(sigma)
+    
+    # Position-specific thresholds
+    if position == "RB":
+        # RBs have tighter distributions
+        if sigma < 0.25:
+            return "High", confidence_score
+        elif sigma < 0.40:
+            return "Medium", confidence_score
+        else:
+            return "Low (High Variance)", confidence_score
+    else:  # WR
+        # WRs have wider distributions
+        if sigma < 0.20:
+            return "High", confidence_score
+        elif sigma < 0.45:
+            return "Medium", confidence_score
+        else:
+            return "Low (High Variance)", confidence_score
 
 
 def _percentiles_from_params(mu: float, sigma: float, ps: List[float]) -> dict[str, float]:
@@ -1112,6 +1153,9 @@ def schedule_predictions(
                 p25 = percentiles["p25"]
                 p75 = percentiles["p75"]
                 
+                # Calculate confidence
+                confidence_label, confidence_score = _calculate_confidence(sigma, "RB")
+                
                 # Check injury status
                 player_name = r["full_name"]
                 injury_status = "ACTIVE"
@@ -1122,11 +1166,7 @@ def schedule_predictions(
                         continue
                 
                 records.append({
-                    "game_id": game_id,
-                    "season": season,
-                    "week": wk,
                     "position": "RB",
-                    "player_id": r["gsis_id"],
                     "player_name": player_name,
                     "team": team,
                     "opponent": home if team == away else away,
@@ -1134,7 +1174,13 @@ def schedule_predictions(
                     "predicted_median": round(median, 1),
                     "predicted_p75": round(p75, 1),
                     "predicted_expected": round(expected, 1),
+                    "confidence_label": confidence_label,
+                    "confidence": round(confidence_score, 3),
                     "injury_status": injury_status,
+                    "game_id": game_id,
+                    "season": season,
+                    "week": wk,
+                    "player_id": r["gsis_id"],
                 })
         
         # Process top WRs
@@ -1158,6 +1204,9 @@ def schedule_predictions(
                 p25 = percentiles["p25"]
                 p75 = percentiles["p75"]
                 
+                # Calculate confidence
+                confidence_label, confidence_score = _calculate_confidence(sigma, "WR")
+                
                 # Check injury status
                 player_name = r["full_name"]
                 injury_status = "ACTIVE"
@@ -1168,11 +1217,7 @@ def schedule_predictions(
                         continue
                 
                 records.append({
-                    "game_id": game_id,
-                    "season": season,
-                    "week": wk,
                     "position": "WR",
-                    "player_id": r["gsis_id"],
                     "player_name": player_name,
                     "team": team,
                     "opponent": home if team == away else away,
@@ -1180,13 +1225,33 @@ def schedule_predictions(
                     "predicted_median": round(median, 1),
                     "predicted_p75": round(p75, 1),
                     "predicted_expected": round(expected, 1),
+                    "confidence_label": confidence_label,
+                    "confidence": round(confidence_score, 3),
                     "injury_status": injury_status,
+                    "game_id": game_id,
+                    "season": season,
+                    "week": wk,
+                    "player_id": r["gsis_id"],
                 })
     
     # Create dataframe and split by position
     all_df = pd.DataFrame(records)
-    rb_df = all_df[all_df["position"] == "RB"].sort_values(["week", "predicted_expected"], ascending=[True, False])
-    wr_df = all_df[all_df["position"] == "WR"].sort_values(["week", "predicted_expected"], ascending=[True, False])
+    rb_df = all_df[all_df["position"] == "RB"].sort_values(["week", "predicted_expected"], ascending=[True, False]).reset_index(drop=True)
+    wr_df = all_df[all_df["position"] == "WR"].sort_values(["week", "predicted_expected"], ascending=[True, False]).reset_index(drop=True)
+    
+    # Add ranking within each week
+    rb_df["rank"] = rb_df.groupby("week").cumcount() + 1
+    wr_df["rank"] = wr_df.groupby("week").cumcount() + 1
+    
+    # Reorder columns to match original format
+    column_order = [
+        "rank", "position", "player_name", "team", "opponent",
+        "predicted_p25", "predicted_median", "predicted_p75", "predicted_expected",
+        "confidence_label", "confidence", "injury_status",
+        "game_id", "season", "week", "player_id"
+    ]
+    rb_df = rb_df[column_order]
+    wr_df = wr_df[column_order]
     
     # Determine output paths
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1520,9 +1585,15 @@ def predict(
         console.print(f"\n📊 Predictions saved to:")
         console.print(f"  • reports/predictions_RB_{season}_{season_type}_week{week}.csv")
         console.print(f"  • reports/predictions_WR_{season}_{season_type}_week{week}.csv")
-        console.print(f"\n[bold]💡 Betting Tip:[/bold] Look for lines outside the p25-p75 range:")
+        console.print(f"\n[bold]💡 Betting Tips:[/bold]")
         console.print(f"  • Line < p25 → Take OVER (high confidence)")
         console.print(f"  • Line > p75 → Take UNDER (high confidence)")
+        console.print(f"  • Check confidence_label → Focus on 'High' and 'Medium' confidence plays")
+        console.print(f"  • Check injury_status → Avoid QUESTIONABLE/DOUBTFUL players")
+        console.print(f"\n[bold yellow]⚠️  IMPORTANT:[/bold yellow] Injury data from ESPN API may be incomplete.")
+        console.print(f"[yellow]   Always verify player status before betting at:[/yellow]")
+        console.print(f"[yellow]   • https://www.nfl.com/injuries/[/yellow]")
+        console.print(f"[yellow]   • Check team injury reports closer to game time[/yellow]")
         
     except Exception as e:
         console.print(f"\n[bold red]✗ Pipeline failed: {e}[/bold red]")
