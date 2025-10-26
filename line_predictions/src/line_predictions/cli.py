@@ -1107,7 +1107,8 @@ def schedule_predictions(
                 sigma = float(player_params["sigma"])
                 median = float(np.exp(mu))
                 expected = _expected_from_params(mu, sigma)
-                percentiles = _percentiles_from_params(mu, sigma, [0.25, 0.75])
+                # Use calibrated percentiles for proper coverage
+                percentiles = _percentiles_from_params_calibrated(mu, sigma, [0.25, 0.75], "RB")
                 p25 = percentiles["p25"]
                 p75 = percentiles["p75"]
                 
@@ -1152,7 +1153,8 @@ def schedule_predictions(
                 sigma = float(player_params["sigma"])
                 median = float(np.exp(mu))
                 expected = _expected_from_params(mu, sigma)
-                percentiles = _percentiles_from_params(mu, sigma, [0.25, 0.75])
+                # Use calibrated percentiles for proper coverage
+                percentiles = _percentiles_from_params_calibrated(mu, sigma, [0.25, 0.75], "WR")
                 p25 = percentiles["p25"]
                 p75 = percentiles["p75"]
                 
@@ -1422,35 +1424,48 @@ def predict(
     season_type: str = typer.Option("REG", help="Season type (REG or POST)"),
     top_n: int = typer.Option(30, help="Number of top players per position"),
 ) -> None:
-    """🏈 Generate NFL player performance predictions with advanced statistical modeling.
+    """🏈 Generate NFL player performance predictions with FULL ADVANCED ALGORITHM.
     
-    This runs the complete prediction pipeline:
+    This runs the complete prediction pipeline with ALL advanced features:
     
-    1. Fetches latest data from nflreadpy
-    2. Fits player models with recency weighting & usage filtering
-    3. Calculates opponent defense adjustments
-    4. Generates predictions for the specified week
+    1. Fetches latest play-by-play & usage data from nflreadpy
+    2. Fetches real-time injury reports from ESPN API
+    3. Fits player models with recency weighting (always enabled)
+    4. Applies usage filtering for reliable players (always enabled)
+    5. Calculates opponent defense adjustments (always enabled)
+    6. Generates calibrated predictions with proper coverage (always enabled)
+    7. Filters out injured (OUT) players automatically
     
     Example:
         uv run line-predictions predict 9
         
-    Advanced Algorithm Features:
+    ✅ Advanced Features (ALL ENABLED BY DEFAULT):
     
     • Recency Weighting: Recent games weighted higher (RB: 0.90, WR: 0.85 decay)
-    • Usage Filtering: Filters unreliable players by snap share & touches
-    • Opponent Adjustments: Adjusts for defensive strength vs league average
-    • Position-Specific: Separate tuning for RB vs WR variance
+    • Usage Filtering: Only players with sufficient snap share & touches
+    • Opponent Adjustments: Defensive strength vs league average
+    • Calibrated Intervals: RB 1.3x, WR 1.5x sigma for proper coverage
+    • Position-Specific: Separate RB (0.90x sigma) vs WR (1.15x sigma) tuning
+    • Injury Tracking: Real-time status, auto-filters OUT players
     
-    Betting Strategy:
+    📊 Betting Strategy:
     
     • Line < p25 → HIGH CONFIDENCE OVER (only 25% chance under)
     • Line > p75 → HIGH CONFIDENCE UNDER (only 25% chance over)
     • p25 ≤ Line ≤ p75 → Lower confidence (close to 50/50)
+    • Check injury_status → Avoid QUESTIONABLE/DOUBTFUL players
     """
     _ensure_dirs()
     
-    console.print("[bold cyan]🏈 NFL Prediction Pipeline (Advanced Algorithm)[/bold cyan]")
+    console.print("[bold cyan]🏈 NFL Prediction Pipeline (FULL ADVANCED ALGORITHM)[/bold cyan]")
     console.print(f"Season: {season} {season_type}, Week: {week}, Top {top_n} per position\n")
+    console.print("[bold green]✅ All Advanced Features Enabled:[/bold green]")
+    console.print("  • Recency weighting (exponential decay)")
+    console.print("  • Usage filtering (snap share + touches)")
+    console.print("  • Opponent defense adjustments")
+    console.print("  • Calibrated prediction intervals")
+    console.print("  • Position-specific tuning (RB vs WR)")
+    console.print("  • Real-time injury tracking\n")
     
     try:
         # Step 1: Fetch data
