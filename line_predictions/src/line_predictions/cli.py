@@ -14,12 +14,10 @@ from scipy.stats import lognorm
 
 import nfl_data_py as nfl
 import nflreadpy as nr
-import re
 import requests
-from bs4 import BeautifulSoup
 
 
-app = typer.Typer(add_completion=False, help="NFL rushing yard predictions for RBs (2025).")
+app = typer.Typer(add_completion=False, help="NFL player performance predictions with advanced statistical modeling.")
 console = Console()
 
 
@@ -29,20 +27,8 @@ PROCESSED_DIR = DATA_DIR / "processed"
 REPORTS_DIR = Path(os.getcwd()).parent / "reports"
 PLOTS_DIR = REPORTS_DIR / "plots"
 
-PFR_BASE = "https://www.pro-football-reference.com"
-
-# Map PFR team codes to common 2-3 letter NFL codes
-PFR_TO_STD: Dict[str, str] = {
-    "crd": "ARI", "atl": "ATL", "rav": "BAL", "buf": "BUF", "car": "CAR",
-    "chi": "CHI", "cin": "CIN", "cle": "CLE", "dal": "DAL", "den": "DEN",
-    "det": "DET", "gnb": "GB",  "htx": "HOU", "clt": "IND", "jax": "JAX",
-    "kan": "KC",  "rai": "LV",  "lac": "LAC", "sdg": "LAC", "ram": "LAR",
-    "mia": "MIA", "min": "MIN", "nwe": "NE",  "nor": "NO",  "nyg": "NYG",
-    "nyj": "NYJ", "phi": "PHI", "pit": "PIT", "sfo": "SF",  "sea": "SEA",
-    "tam": "TB",  "oti": "TEN", "was": "WAS",
-}
-
-PFR_TEAMS: List[str] = list(PFR_TO_STD.keys())
+# ESPN API for injury data
+ESPN_API_BASE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
 
 # Position-specific configuration
 RB_CONFIG = {
@@ -67,6 +53,47 @@ WR_CONFIG = {
 def _ensure_dirs() -> None:
     for d in [DATA_DIR, RAW_DIR, PROCESSED_DIR, REPORTS_DIR, PLOTS_DIR]:
         d.mkdir(parents=True, exist_ok=True)
+
+
+def _fetch_injury_data(season: int, week: int) -> Dict[str, Dict[str, str]]:
+    """Fetch injury data from ESPN API for the specified week.
+    
+    Returns:
+        Dictionary mapping player_name -> {status, team, position}
+        Status can be: OUT, DOUBTFUL, QUESTIONABLE, PROBABLE, or None
+    """
+    injury_dict = {}
+    
+    try:
+        # ESPN API endpoint for injuries
+        url = f"{ESPN_API_BASE}/injuries"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Parse injury data
+        for team in data.get("teams", []):
+            team_abbr = team.get("team", {}).get("abbreviation")
+            
+            for athlete in team.get("injuries", []):
+                player_name = athlete.get("athlete", {}).get("displayName")
+                injury_status = athlete.get("status", {}).get("type")  # OUT, QUESTIONABLE, etc.
+                position = athlete.get("athlete", {}).get("position", {}).get("abbreviation")
+                
+                if player_name and injury_status:
+                    injury_dict[player_name] = {
+                        "status": injury_status.upper(),
+                        "team": team_abbr,
+                        "position": position
+                    }
+        
+        console.print(f"[green]✓ Fetched injury data for {len(injury_dict)} players[/green]")
+        
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Could not fetch injury data: {e}[/yellow]")
+        console.print("[yellow]   Continuing without injury adjustments[/yellow]")
+    
+    return injury_dict
 
 
 def _zero_as_zero_log(values: pd.Series) -> pd.Series:
@@ -972,6 +999,9 @@ def schedule_predictions(
     """Build comprehensive predictions spreadsheet with top N RBs and top N WRs for upcoming games."""
     _ensure_dirs()
     
+    # Fetch injury data for the week
+    injury_data = _fetch_injury_data(season, week) if week else {}
+    
     # Load params and deltas for both positions
     rb_params_path = PROCESSED_DIR / f"player_lognorm_RB_{season}_{season_type}.json"
     rb_deltas_path = PROCESSED_DIR / f"team_defense_delta_RB_{season}_{season_type}.json"
@@ -1081,19 +1111,29 @@ def schedule_predictions(
                 p25 = percentiles["p25"]
                 p75 = percentiles["p75"]
                 
+                # Check injury status
+                player_name = r["full_name"]
+                injury_status = "ACTIVE"
+                if player_name in injury_data:
+                    injury_status = injury_data[player_name]["status"]
+                    # Skip players who are OUT
+                    if injury_status == "OUT":
+                        continue
+                
                 records.append({
                     "game_id": game_id,
                     "season": season,
                     "week": wk,
                     "position": "RB",
                     "player_id": r["gsis_id"],
-                    "player_name": r["full_name"],
+                    "player_name": player_name,
                     "team": team,
                     "opponent": home if team == away else away,
                     "predicted_p25": round(p25, 1),
                     "predicted_median": round(median, 1),
                     "predicted_p75": round(p75, 1),
                     "predicted_expected": round(expected, 1),
+                    "injury_status": injury_status,
                 })
         
         # Process top WRs
@@ -1116,19 +1156,29 @@ def schedule_predictions(
                 p25 = percentiles["p25"]
                 p75 = percentiles["p75"]
                 
+                # Check injury status
+                player_name = r["full_name"]
+                injury_status = "ACTIVE"
+                if player_name in injury_data:
+                    injury_status = injury_data[player_name]["status"]
+                    # Skip players who are OUT
+                    if injury_status == "OUT":
+                        continue
+                
                 records.append({
                     "game_id": game_id,
                     "season": season,
                     "week": wk,
                     "position": "WR",
                     "player_id": r["gsis_id"],
-                    "player_name": r["full_name"],
+                    "player_name": player_name,
                     "team": team,
                     "opponent": home if team == away else away,
                     "predicted_p25": round(p25, 1),
                     "predicted_median": round(median, 1),
                     "predicted_p75": round(p75, 1),
                     "predicted_expected": round(expected, 1),
+                    "injury_status": injury_status,
                 })
     
     # Create dataframe and split by position
