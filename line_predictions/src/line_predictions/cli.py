@@ -30,7 +30,8 @@ PLOTS_DIR = REPORTS_DIR / "plots"
 # ESPN API for injury data
 ESPN_API_BASE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
 
-# Position-specific configuration
+# Position-specific configuration for advanced algorithm
+# These are base values that can be adapted based on performance
 RB_CONFIG = {
     "recency_decay": 0.90,           # Exponential decay for recency weighting
     "min_snap_pct": 0.30,            # Minimum 30% snap share in recent games
@@ -48,6 +49,130 @@ WR_CONFIG = {
     "sigma_adjust": 1.15,            # Increase variance (wider distribution)
     "sigma_calibration": 1.5,        # Larger inflation for WRs
 }
+
+# Adaptive tuning configuration
+ADAPTIVE_CONFIG = {
+    "enabled": True,                 # Enable adaptive parameter tuning
+    "learning_rate": 0.1,            # How aggressively to adjust (0.0 to 1.0)
+    "min_samples": 10,               # Minimum predictions needed for tuning
+    "accuracy_threshold": 10.0,      # Within 10 yards = correct prediction
+}
+
+
+def _load_adaptive_params(position: str, season: int, season_type: str) -> Optional[Dict]:
+    """Load previously tuned parameters if available."""
+    param_file = PROCESSED_DIR / f"adaptive_params_{position}_{season}_{season_type}.json"
+    if param_file.exists():
+        try:
+            with param_file.open("r") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+
+def _save_adaptive_params(params: Dict, position: str, season: int, season_type: str) -> None:
+    """Save tuned parameters for future use."""
+    param_file = PROCESSED_DIR / f"adaptive_params_{position}_{season}_{season_type}.json"
+    with param_file.open("w") as f:
+        json.dump(params, f, indent=2)
+    console.print(f"[green]✓ Saved adaptive parameters for {position}[/green]")
+
+
+def _tune_parameters(
+    predictions_df: pd.DataFrame,
+    actuals_df: pd.DataFrame,
+    current_config: Dict,
+    position: str
+) -> Dict:
+    """Tune parameters based on prediction performance using reinforcement learning.
+    
+    Reward function: Predictions within 10 yards = correct
+    Adjusts: recency_decay, sigma_adjust, sigma_calibration
+    """
+    # Merge predictions with actuals
+    yards_col = "rushing_yards" if position == "RB" else "receiving_yards"
+    merged = predictions_df.merge(
+        actuals_df[["player_id", "week", yards_col]],
+        on=["player_id", "week"],
+        how="inner"
+    )
+    
+    if len(merged) < ADAPTIVE_CONFIG["min_samples"]:
+        console.print(f"[yellow]  • Not enough samples ({len(merged)}) for tuning, need {ADAPTIVE_CONFIG['min_samples']}[/yellow]")
+        return current_config
+    
+    # Calculate error metrics
+    errors = np.abs(merged["predicted_expected"] - merged[yards_col])
+    mae = errors.mean()
+    within_10 = (errors <= ADAPTIVE_CONFIG["accuracy_threshold"]).mean() * 100
+    
+    # Calculate coverage (% of actuals within predicted range)
+    within_range = (
+        (merged[yards_col] >= merged["predicted_p25"]) &
+        (merged[yards_col] <= merged["predicted_p75"])
+    ).mean() * 100
+    
+    console.print(f"[cyan]  📊 Performance Metrics:[/cyan]")
+    console.print(f"    • MAE: {mae:.1f} yards")
+    console.print(f"    • Accuracy (±10 yards): {within_10:.1f}%")
+    console.print(f"    • Coverage (p25-p75): {within_range:.1f}%")
+    
+    # Calculate rewards/penalties
+    # Goal: MAE < 25 for RB, < 30 for WR; Accuracy > 40%; Coverage ~25%
+    target_mae = 25.0 if position == "RB" else 30.0
+    target_accuracy = 40.0
+    target_coverage = 25.0
+    
+    mae_error = (mae - target_mae) / target_mae  # Negative is good
+    accuracy_reward = (within_10 - target_accuracy) / target_accuracy  # Positive is good
+    coverage_error = abs(within_range - target_coverage) / target_coverage  # Lower is better
+    
+    # Adjust parameters using gradient descent
+    lr = ADAPTIVE_CONFIG["learning_rate"]
+    new_config = current_config.copy()
+    
+    # Adjust recency_decay: If MAE high and accuracy low, increase decay (more recency weight)
+    if mae > target_mae and within_10 < target_accuracy:
+        decay_adjustment = -lr * 0.02  # Increase decay (move toward 1.0)
+        new_config["recency_decay"] = np.clip(
+            current_config["recency_decay"] + decay_adjustment,
+            0.80, 0.95
+        )
+    
+    # Adjust sigma_calibration: If coverage too low, increase; if too high, decrease
+    if within_range < target_coverage - 5:
+        calibration_adjustment = lr * 0.1  # Increase calibration
+        new_config["sigma_calibration"] = np.clip(
+            current_config["sigma_calibration"] + calibration_adjustment,
+            1.0, 2.0
+        )
+    elif within_range > target_coverage + 5:
+        calibration_adjustment = -lr * 0.1  # Decrease calibration
+        new_config["sigma_calibration"] = np.clip(
+            current_config["sigma_calibration"] + calibration_adjustment,
+            1.0, 2.0
+        )
+    
+    # Adjust sigma_adjust: If variance too high (accuracy low), tighten distribution
+    if within_10 < target_accuracy:
+        sigma_adjustment = -lr * 0.05  # Tighten distribution
+        new_config["sigma_adjust"] = np.clip(
+            current_config["sigma_adjust"] + sigma_adjustment,
+            0.70, 1.30
+        )
+    
+    # Show adjustments
+    if new_config != current_config:
+        console.print(f"[green]  ✓ Tuning parameters based on performance:[/green]")
+        for key in ["recency_decay", "sigma_adjust", "sigma_calibration"]:
+            if new_config[key] != current_config[key]:
+                direction = "↑" if new_config[key] > current_config[key] else "↓"
+                console.print(f"    {direction} {key}: {current_config[key]:.3f} → {new_config[key]:.3f}")
+    else:
+        console.print(f"[green]  ✓ Parameters are optimal, no tuning needed[/green]")
+    
+    return new_config
 
 
 def _ensure_dirs() -> None:
@@ -1600,7 +1725,166 @@ def predict(
         raise
 
 
+@app.command()
+def tune(
+    season: int = typer.Option(2025, help="Season year"),
+    season_type: str = typer.Option("REG", help="Season type (REG or POST)"),
+    prediction_week: int = typer.Option(..., help="Week you made predictions for"),
+    position: str = typer.Option("RB", help="Position to analyze (RB or WR)"),
+) -> None:
+    """Analyze prediction performance and suggest parameter tuning.
+    
+    Compares your predictions vs actual results to help you manually tune parameters.
+    Shows what went wrong and suggests adjustments.
+    
+    Example:
+        uv run line-predictions tune --prediction-week 8 --position RB
+    """
+    _ensure_dirs()
+    
+    console.print(f"[bold cyan]🔧 Manual Parameter Tuning Analysis[/bold cyan]")
+    console.print(f"Position: {position}, Week: {prediction_week}\n")
+    
+    # Load predictions
+    pred_file = REPORTS_DIR / f"predictions_{position}_{season}_{season_type}_week{prediction_week}.csv"
+    if not pred_file.exists():
+        console.print(f"[red]✗ Prediction file not found: {pred_file}[/red]")
+        console.print(f"[yellow]  Run predictions first: uv run line-predictions predict {prediction_week}[/yellow]")
+        return
+    
+    predictions = pd.read_csv(pred_file)
+    console.print(f"[green]✓ Loaded {len(predictions)} predictions from week {prediction_week}[/green]")
+    
+    # Load actuals
+    yards_col = "rushing_yards" if position == "RB" else "receiving_yards"
+    actuals_file = RAW_DIR / f"weekly_{position}_{season}_{season_type}.parquet"
+    
+    if not actuals_file.exists():
+        console.print(f"[red]✗ Actuals file not found: {actuals_file}[/red]")
+        console.print(f"[yellow]  Run: uv run line-predictions fetch --season {season}[/yellow]")
+        return
+    
+    actuals = pd.read_parquet(actuals_file)
+    actuals = actuals[actuals["week"] == prediction_week]
+    
+    if len(actuals) == 0:
+        console.print(f"[red]✗ No actual results yet for week {prediction_week}[/red]")
+        console.print(f"[yellow]  Games may not have been played yet, or fetch data after games complete[/yellow]")
+        return
+    
+    console.print(f"[green]✓ Loaded {len(actuals)} actual results from week {prediction_week}[/green]\n")
+    
+    # Merge predictions with actuals
+    merged = predictions.merge(
+        actuals[["player_id", yards_col]],
+        on="player_id",
+        how="inner"
+    )
+    
+    if len(merged) == 0:
+        console.print(f"[red]✗ No matching players found between predictions and actuals[/red]")
+        return
+    
+    console.print(f"[cyan]📊 Matched {len(merged)} players with both predictions and actual results[/cyan]\n")
+    
+    # Calculate errors
+    merged["error"] = merged["predicted_expected"] - merged[yards_col]
+    merged["abs_error"] = np.abs(merged["error"])
+    merged["within_10"] = merged["abs_error"] <= 10.0
+    merged["within_p25_p75"] = (merged[yards_col] >= merged["predicted_p25"]) & (merged[yards_col] <= merged["predicted_p75"])
+    
+    # Overall metrics
+    mae = merged["abs_error"].mean()
+    within_10_pct = merged["within_10"].mean() * 100
+    coverage = merged["within_p25_p75"].mean() * 100
+    overestimate_pct = (merged["error"] > 0).mean() * 100
+    
+    console.print("[bold]Overall Performance:[/bold]")
+    console.print(f"  MAE: {mae:.1f} yards")
+    console.print(f"  Accuracy (±10 yards): {within_10_pct:.1f}%")
+    console.print(f"  Coverage (p25-p75): {coverage:.1f}%")
+    console.print(f"  Overestimate rate: {overestimate_pct:.1f}%\n")
+    
+    # Show worst misses
+    worst = merged.nlargest(10, "abs_error")[["player_name", "predicted_expected", yards_col, "error", "abs_error"]]
+    console.print("[bold red]Top 10 Worst Predictions:[/bold red]")
+    table = Table(show_header=True)
+    table.add_column("Player", style="cyan")
+    table.add_column("Predicted", justify="right")
+    table.add_column("Actual", justify="right")
+    table.add_column("Error", justify="right")
+    
+    for _, row in worst.iterrows():
+        error_color = "red" if row["abs_error"] > 30 else "yellow"
+        table.add_row(
+            row["player_name"],
+            f"{row['predicted_expected']:.1f}",
+            f"{row[yards_col]:.1f}",
+            f"[{error_color}]{row['error']:+.1f}[/{error_color}]"
+        )
+    console.print(table)
+    console.print()
+    
+    # Analysis & Suggestions
+    console.print("[bold]🔍 Analysis & Tuning Suggestions:[/bold]\n")
+    
+    # Current config
+    config = RB_CONFIG if position == "RB" else WR_CONFIG
+    console.print(f"[cyan]Current Parameters ({position}):[/cyan]")
+    console.print(f"  • recency_decay: {config['recency_decay']}")
+    console.print(f"  • sigma_adjust: {config['sigma_adjust']}")
+    console.print(f"  • sigma_calibration: {config['sigma_calibration']}\n")
+    
+    # Suggestions based on performance
+    suggestions = []
+    
+    # Check MAE
+    target_mae = 25.0 if position == "RB" else 30.0
+    if mae > target_mae:
+        suggestions.append(f"❌ MAE ({mae:.1f}) is above target ({target_mae:.0f})")
+        if overestimate_pct > 60:
+            suggestions.append(f"   → You're OVERESTIMATING {overestimate_pct:.0f}% of the time")
+            suggestions.append(f"   → Try: recency_decay -= 0.02 (less weight on recent hot streaks)")
+        elif overestimate_pct < 40:
+            suggestions.append(f"   → You're UNDERESTIMATING {100-overestimate_pct:.0f}% of the time")
+            suggestions.append(f"   → Try: recency_decay += 0.02 (more weight on recent performance)")
+    else:
+        suggestions.append(f"✅ MAE ({mae:.1f}) is at or below target ({target_mae:.0f})")
+    
+    # Check accuracy within 10 yards
+    if within_10_pct < 40:
+        suggestions.append(f"❌ Accuracy (±10 yards) is low: {within_10_pct:.0f}%")
+        suggestions.append(f"   → Try: sigma_adjust -= 0.05 (tighten distribution)")
+    elif within_10_pct > 60:
+        suggestions.append(f"✅ Accuracy (±10 yards) is excellent: {within_10_pct:.0f}%")
+    else:
+        suggestions.append(f"✅ Accuracy (±10 yards) is good: {within_10_pct:.0f}%")
+    
+    # Check coverage
+    target_coverage = 25.0
+    if coverage < target_coverage - 5:
+        suggestions.append(f"❌ Coverage ({coverage:.0f}%) is too narrow (target {target_coverage:.0f}%)")
+        suggestions.append(f"   → Try: sigma_calibration += 0.1 (wider prediction intervals)")
+    elif coverage > target_coverage + 5:
+        suggestions.append(f"⚠️  Coverage ({coverage:.0f}%) is too wide (target {target_coverage:.0f}%)")
+        suggestions.append(f"   → Try: sigma_calibration -= 0.1 (tighter prediction intervals)")
+    else:
+        suggestions.append(f"✅ Coverage ({coverage:.0f}%) is on target ({target_coverage:.0f}%)")
+    
+    # Print suggestions
+    for suggestion in suggestions:
+        console.print(suggestion)
+    
+    console.print(f"\n[bold yellow]📝 Manual Tuning Steps:[/bold yellow]")
+    console.print(f"1. Edit line_predictions/src/line_predictions/cli.py")
+    console.print(f"2. Update {position}_CONFIG parameters based on suggestions above")
+    console.print(f"3. Re-run predictions: uv run line-predictions predict {prediction_week + 1}")
+    console.print(f"4. After games complete, run tune again to verify improvements")
+    console.print(f"\n[bold]Tip:[/bold] Make small adjustments (±0.02 to ±0.1) and iterate")
+
+
 def run() -> None:
     app()
+
 
 
