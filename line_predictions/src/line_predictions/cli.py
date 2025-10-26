@@ -32,13 +32,14 @@ ESPN_API_BASE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
 
 # Position-specific configuration for advanced algorithm
 # These are base values that can be adapted based on performance
+# Tuned based on Week 7 performance: 2025-10-26
 RB_CONFIG = {
     "recency_decay": 0.90,           # Exponential decay for recency weighting
     "min_snap_pct": 0.30,            # Minimum 30% snap share in recent games
     "min_games": 3,                  # Minimum games played
-    "sigma_adjust": 0.90,            # Reduce variance (tighter distribution)
+    "sigma_adjust": 0.85,            # Was 0.90, reduced to tighten (accuracy was 19%)
     "min_touches_per_game": 8,       # Minimum touches (rush + receptions)
-    "sigma_calibration": 1.3,        # Inflate sigma for better coverage
+    "sigma_calibration": 1.2,        # Was 1.3, reduced (coverage was 42%, target 25%)
 }
 
 WR_CONFIG = {
@@ -46,8 +47,8 @@ WR_CONFIG = {
     "min_snap_pct": 0.40,            # Minimum 40% snap share
     "min_target_share": 0.10,        # Or 10% target share
     "min_games": 3,                  # Minimum games played
-    "sigma_adjust": 1.15,            # Increase variance (wider distribution)
-    "sigma_calibration": 1.5,        # Larger inflation for WRs
+    "sigma_adjust": 1.10,            # Was 1.15, reduced to tighten (accuracy was 19%)
+    "sigma_calibration": 1.4,        # Was 1.5, reduced (coverage was 52%, target 25%)
 }
 
 # Adaptive tuning configuration
