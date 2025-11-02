@@ -182,52 +182,133 @@ def _ensure_dirs() -> None:
 
 
 def _fetch_injury_data(season: int, week: int) -> Dict[str, Dict[str, str]]:
-    """Fetch injury data from ESPN API for the specified week.
+    """Fetch injury data from multiple sources for the specified week.
+    
+    Tries in order:
+    1. Manual overrides (data/manual_injuries.json)
+    2. NFL official injury report API
+    3. ESPN API
     
     Returns:
         Dictionary mapping player_name -> {status, team, position}
-        Status can be: OUT, DOUBTFUL, QUESTIONABLE, PROBABLE, or None
+        Status can be: OUT, DOUBTFUL, QUESTIONABLE, PROBABLE, IR (injured reserve)
     """
     injury_dict = {}
     
+    # Load manual overrides first (highest priority)
+    manual_file = DATA_DIR / "manual_injuries.json"
+    if manual_file.exists():
+        try:
+            with manual_file.open("r") as f:
+                manual_data = json.load(f)
+            
+            season_data = manual_data.get(str(season), {})
+            
+            # Season-ending injuries
+            for player in season_data.get("season_ending", []):
+                injury_dict[player["player_name"]] = {
+                    "status": player["status"],
+                    "team": player["team"],
+                    "position": player["position"]
+                }
+            
+            # Week-specific injuries
+            week_key = f"week{week}"
+            for player in season_data.get(week_key, []):
+                injury_dict[player["player_name"]] = {
+                    "status": player["status"],
+                    "team": player["team"],
+                    "position": player["position"]
+                }
+            
+            if injury_dict:
+                console.print(f"[cyan]✓ Loaded {len(injury_dict)} manual injury overrides[/cyan]")
+                for name in injury_dict:
+                    console.print(f"  • {name}: {injury_dict[name]['status']}")
+        except Exception as e:
+            console.print(f"[yellow]⚠️  Could not load manual injuries: {e}[/yellow]")
+    
+    # Try NFL official API
     try:
-        # ESPN API endpoint for injuries
+        # NFL's official injury endpoint
+        url = f"https://api.nfl.com/v1/reroute?_url=https://api.nfl.com/football/v2/injury-report/seasons/{season}/week/{week}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            for team_data in data.get("teams", []):
+                team_abbr = team_data.get("team", {}).get("abbreviation", "")
+                
+                for player in team_data.get("players", []):
+                    player_name = player.get("displayName")
+                    injury_status = player.get("gameStatus", "").upper()  # OUT, QUESTIONABLE, DOUBTFUL
+                    position = player.get("position", "")
+                    
+                    # Don't override manual entries
+                    if player_name and injury_status and player_name not in injury_dict:
+                        injury_dict[player_name] = {
+                            "status": injury_status,
+                            "team": team_abbr,
+                            "position": position
+                        }
+            
+            if len(injury_dict) > 0:
+                api_count = len([k for k in injury_dict.keys() if k not in manual_file.exists()])
+                console.print(f"[green]✓ Fetched injury data from NFL API: {len(injury_dict)} total players[/green]")
+                # Show injured players by status
+                out = [n for n, i in injury_dict.items() if i["status"] == "OUT"]
+                doubtful = [n for n, i in injury_dict.items() if i["status"] == "DOUBTFUL"]
+                questionable = [n for n, i in injury_dict.items() if i["status"] == "QUESTIONABLE"]
+                
+                if out:
+                    console.print(f"  [red]OUT ({len(out)}):[/red] {', '.join(out[:5])}" + (f" ...and {len(out)-5} more" if len(out) > 5 else ""))
+                if doubtful:
+                    console.print(f"  [yellow]DOUBTFUL ({len(doubtful)}):[/yellow] {', '.join(doubtful[:3])}" + (f" ...and {len(doubtful)-3} more" if len(doubtful) > 3 else ""))
+                if questionable:
+                    console.print(f"  [yellow]QUESTIONABLE ({len(questionable)}):[/yellow] {', '.join(questionable[:3])}" + (f" ...and {len(questionable)-3} more" if len(questionable) > 3 else ""))
+                
+                return injury_dict
+    except Exception as e:
+        console.print(f"[yellow]⚠️  NFL API failed: {e}[/yellow]")
+    
+    # Try ESPN API as fallback
+    try:
         url = f"{ESPN_API_BASE}/injuries"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        # Parse injury data
         for team in data.get("teams", []):
             team_abbr = team.get("team", {}).get("abbreviation")
             
             for athlete in team.get("injuries", []):
                 player_name = athlete.get("athlete", {}).get("displayName")
-                injury_status = athlete.get("status", {}).get("type")  # OUT, QUESTIONABLE, etc.
+                injury_status = athlete.get("status", {}).get("type", "").upper()
                 position = athlete.get("athlete", {}).get("position", {}).get("abbreviation")
                 
-                if player_name and injury_status:
+                if player_name and injury_status and player_name not in injury_dict:
                     injury_dict[player_name] = {
-                        "status": injury_status.upper(),
+                        "status": injury_status,
                         "team": team_abbr,
                         "position": position
                     }
         
         if injury_dict:
-            console.print(f"[green]✓ Fetched injury data for {len(injury_dict)} players[/green]")
-            # Show sample of injured players
-            sample = list(injury_dict.items())[:5]
-            for name, info in sample:
-                console.print(f"  • {name} ({info['position']}): {info['status']}")
-            if len(injury_dict) > 5:
-                console.print(f"  ... and {len(injury_dict) - 5} more")
-        else:
-            console.print("[yellow]⚠️  No injury data available from ESPN API[/yellow]")
-            console.print("[yellow]   All players will show as ACTIVE - verify injury status manually[/yellow]")
-        
+            console.print(f"[green]✓ Fetched injury data from ESPN API: {len(injury_dict)} players[/green]")
+            return injury_dict
+            
     except Exception as e:
-        console.print(f"[yellow]⚠️  Could not fetch injury data: {e}[/yellow]")
-        console.print("[yellow]   All players will show as ACTIVE - verify injury status manually[/yellow]")
+        console.print(f"[yellow]⚠️  ESPN API failed: {e}[/yellow]")
+    
+    # If all APIs fail, warn user
+    if not injury_dict:
+        console.print("[yellow]⚠️  No injury data available from any source[/yellow]")
+        console.print("[yellow]   All players will show as ACTIVE - VERIFY MANUALLY[/yellow]")
+        console.print("[yellow]   Check: https://www.nfl.com/injuries/[/yellow]")
     
     return injury_dict
 
