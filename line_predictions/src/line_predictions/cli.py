@@ -883,14 +883,39 @@ def fit_players(
         # Build per-player week grid
         grids = []
         for pid, grp in weekly.groupby("player_id"):
-            present = grp[["week", "yards_adj"]].set_index("week")
-            reindexed = present.reindex(all_weeks, fill_value=0).reset_index().rename(columns={"index": "week"})
+            # Aggregate duplicate player-week rows before densifying to avoid pandas reindex errors
+            yards_by_week = (
+                grp[["week", "yards_adj"]]
+                .groupby("week", as_index=True)["yards_adj"]
+                .sum()
+            )
+            reindexed = (
+                yards_by_week.reindex(all_weeks, fill_value=0)
+                .rename_axis("week")
+                .reset_index()
+            )
             reindexed.insert(0, "player_id", pid)
             
             # If usage data available, merge it back
             if usage_df is not None and "snap_pct" in grp.columns:
-                usage_cols = ["week"] + [c for c in grp.columns if c in ["snap_pct", "touch_share", "target_share", "touches", "targets"]]
-                usage_present = grp[usage_cols].set_index("week")
+                usage_cols = ["week"] + [
+                    c
+                    for c in grp.columns
+                    if c in ["snap_pct", "touch_share", "target_share", "touches", "targets"]
+                ]
+                if len(usage_cols) > 1:
+                    agg_map = {
+                        col: ("mean" if col in {"snap_pct", "touch_share", "target_share"} else "sum")
+                        for col in usage_cols[1:]
+                    }
+                    usage_present = (
+                        grp[usage_cols]
+                        .groupby("week", as_index=False)
+                        .agg(agg_map)
+                        .set_index("week")
+                    )
+                else:
+                    usage_present = grp[["week"]].drop_duplicates().set_index("week")
                 usage_reindexed = usage_present.reindex(all_weeks, fill_value=0).reset_index()
                 reindexed = reindexed.merge(usage_reindexed, on="week", how="left")
             
